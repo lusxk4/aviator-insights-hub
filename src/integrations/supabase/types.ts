@@ -14,7 +14,134 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      candles: {
+        Row: {
+          cor: string
+          created_at: string | null
+          fonte: string | null
+          id: string
+          multiplicador: number
+          rodada_id: string | null
+          session_id: string | null
+          user_id: string
+        }
+        Insert: {
+          cor: string
+          created_at?: string | null
+          fonte?: string | null
+          id?: string
+          multiplicador: number
+          rodada_id?: string | null
+          session_id?: string | null
+          user_id: string
+        }
+        Update: {
+          cor?: string
+          created_at?: string | null
+          fonte?: string | null
+          id?: string
+          multiplicador?: number
+          rodada_id?: string | null
+          session_id?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      sessions: {
+        Row: {
+          created_at: string | null
+          id: string
+          label: string | null
+          total_candles: number | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          label?: string | null
+          total_candles?: number | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          label?: string | null
+          total_candles?: number | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      strategies: {
+        Row: {
+          created_at: string | null
+          description: string | null
+          id: string
+          is_public: boolean | null
+          name: string
+          rules: Json | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          description?: string | null
+          id?: string
+          is_public?: boolean | null
+          name: string
+          rules?: Json | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          description?: string | null
+          id?: string
+          is_public?: boolean | null
+          name?: string
+          rules?: Json | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      strategy_results: {
+        Row: {
+          banca_antes: number | null
+          banca_depois: number | null
+          created_at: string | null
+          id: string
+          multiplicador_entrada: number | null
+          resultado: string | null
+          strategy_id: string
+          user_id: string
+        }
+        Insert: {
+          banca_antes?: number | null
+          banca_depois?: number | null
+          created_at?: string | null
+          id?: string
+          multiplicador_entrada?: number | null
+          resultado?: string | null
+          strategy_id: string
+          user_id: string
+        }
+        Update: {
+          banca_antes?: number | null
+          banca_depois?: number | null
+          created_at?: string | null
+          id?: string
+          multiplicador_entrada?: number | null
+          resultado?: string | null
+          strategy_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "strategy_results_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
