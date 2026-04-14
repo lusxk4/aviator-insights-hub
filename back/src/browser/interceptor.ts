@@ -173,4 +173,4 @@ function tryParseCandle(payload: string, isBinary: boolean): void {
       saveCandle(candle);
     }
   } catch (err) {}
-}  iS5-Twe-Ehe-Fr9
+}  
