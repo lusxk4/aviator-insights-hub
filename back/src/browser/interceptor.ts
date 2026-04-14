@@ -15,53 +15,44 @@ export function getDetectedWSUrls(): string[] {
   return detectedWSUrls
 }
 
+/**
+ * Inicia a interceptação de WebSockets e monitoramento de iframes
+ */
 export async function startInterception(page: Page): Promise<void> {
   logger.info('🔍 Iniciando interceptação de WebSockets...')
 
-  // Listener nativo do Playwright (captura WS da página principal, se houver)
+  // Monitoramento nativo
   attachWSListener(page, 'main')
 
-  // ✅ Força reload do iframe do jogo para que o context.addInitScript
-  // (injetado no launcher.ts) rode ANTES do WebSocket do jogo ser criado.
-  // Sem o reload, o iframe já estava carregado antes da injeção.
+  // Reinicia o iframe do jogo para injetar o script antes do WS conectar
   await forceReloadGameIframe(page)
 
-  // Inicia polling em frames já existentes
+  // Polling em frames existentes
   for (const frame of page.frames()) {
-    logger.debug(`Frame encontrado: ${frame.url()}`)
     tryStartPolling(frame)
   }
 
-  // Monitora novos frames que aparecerem
+  // Monitora novos frames
   page.on('frameattached', async (frame) => {
-    logger.debug(`Novo frame anexado: ${frame.url()}`)
     await new Promise(r => setTimeout(r, 500))
     tryStartPolling(frame)
   })
 
   page.on('framenavigated', async (frame) => {
-    logger.debug(`Frame navegado: ${frame.url()}`)
-    // Pequena espera para o frame inicializar
     await new Promise(r => setTimeout(r, 200))
     tryStartPolling(frame)
   })
 
-  logger.info('✅ Interceptação ativa!')
+  logger.info('✅ Interceptação ativa e aguardando crash!')
 }
 
 async function forceReloadGameIframe(page: Page): Promise<void> {
   try {
     logger.info('🔄 Recarregando iframe do jogo para ativar interceptor...')
-
-    // Localiza o iframe do jogo e força reload via src
     await page.evaluate(() => {
       const iframes = Array.from(document.querySelectorAll('iframe'))
       const gameIframe = iframes.find(f =>
-        f.src && (
-          f.src.includes('p-j-0-h.com') ||
-          f.src.includes('aviator') ||
-          f.src.includes('spribe')
-        )
+        f.src && (f.src.includes('p-j-0-h.com') || f.src.includes('aviator') || f.src.includes('spribe'))
       )
       if (gameIframe) {
         const src = gameIframe.src
@@ -69,184 +60,135 @@ async function forceReloadGameIframe(page: Page): Promise<void> {
         setTimeout(() => { gameIframe.src = src }, 100)
       }
     })
-
-    // Aguarda o iframe recarregar e o jogo conectar ao WebSocket
-    await page.waitForTimeout(8000)
-    logger.info('✅ Iframe recarregado — interceptor ativo antes do WS do jogo!')
-
+    await page.waitForTimeout(5000)
   } catch (err) {
-    logger.warn(`⚠️  Falha ao recarregar iframe: ${err} — continuando mesmo assim`)
+    logger.warn(`⚠️ Erro ao recarregar iframe: ${err}`)
   }
 }
 
 function isGameFrame(url: string): boolean {
-  return (
-    url.includes('p-j-0-h.com') ||
-    url.includes('aviator') ||
-    url.includes('spribe')
-  )
+  return url.includes('p-j-0-h.com') || url.includes('aviator') || url.includes('spribe')
 }
 
 function tryStartPolling(frame: Frame): void {
   const url = frame.url()
-  if (!url || url === 'about:blank') return
-  if (!isGameFrame(url)) return
-
-  logger.info(`🎮 Iniciando polling no frame do jogo: ${url}`)
+  if (!url || url === 'about:blank' || !isGameFrame(url)) return
+  logger.info(`🎮 Polling ativo no frame: ${url.substring(0, 50)}...`)
   startPolling(frame)
 }
 
 function startPolling(frame: Frame): void {
   let lastProcessedIndex = 0
-  let consecutiveErrors = 0
-  const MAX_ERRORS = 10
-
   const interval = setInterval(async () => {
     try {
-      if (frame.isDetached()) {
-        clearInterval(interval)
-        logger.warn('⚠️  Frame do jogo desanexado, parando polling')
-        return
-      }
+      if (frame.isDetached()) return clearInterval(interval)
 
       const messages = await frame.evaluate((fromIndex: number) => {
         const msgs = (window as any).__wsMessages || []
         return msgs.slice(fromIndex)
       }, lastProcessedIndex)
 
-      consecutiveErrors = 0 // reset no sucesso
-
       if (messages && messages.length > 0) {
         lastProcessedIndex += messages.length
-
         for (const msg of messages) {
-          const { url, payload, timestamp } = msg
-
-          if (!detectedWSUrls.includes(url)) {
-            detectedWSUrls.push(url)
-            logger.info(`🌐 WebSocket detectado (iframe): ${url}`)
-          }
-
-          rawFrames.unshift({ url, payload: payload.substring(0, 500), timestamp })
-          if (rawFrames.length > MAX_RAW_FRAMES) rawFrames.pop()
-
-          logger.debug(`📨 Frame recebido [iframe]: ${payload.substring(0, 200)}`)
-          tryParseCandle(payload, url)
+          tryParseCandle(msg.payload, msg.url, msg.isBinary === true)
         }
       }
-    } catch (err) {
-      consecutiveErrors++
-      if (consecutiveErrors >= MAX_ERRORS) {
-        clearInterval(interval)
-        logger.warn(`⚠️  Polling encerrado após ${MAX_ERRORS} erros consecutivos`)
-      }
-    }
-  }, 500)
+    } catch (err) { /* ignore silent errors during navigation */ }
+  }, 300)
 }
 
 function attachWSListener(page: Page, label: string): void {
   page.on('websocket', ws => {
     const wsUrl = ws.url()
     if (!detectedWSUrls.includes(wsUrl)) detectedWSUrls.push(wsUrl)
-    logger.info(`🌐 WebSocket detectado (${label}): ${wsUrl}`)
 
     ws.on('framereceived', frame => {
       const payload = frame.payload.toString()
-
-      rawFrames.unshift({
-        url: wsUrl,
-        payload: payload.substring(0, 500),
-        timestamp: new Date().toISOString()
-      })
-      if (rawFrames.length > MAX_RAW_FRAMES) rawFrames.pop()
-
-      logger.debug(`📨 Frame recebido [${wsUrl.split('/').pop()}]: ${payload.substring(0, 200)}`)
-      tryParseCandle(payload, wsUrl)
-    })
-
-    ws.on('framesent', frame => {
-      logger.debug(`📤 Frame enviado: ${frame.payload.toString().substring(0, 100)}`)
-    })
-
-    ws.on('close', () => {
-      logger.warn(`⚠️  WebSocket fechado: ${wsUrl}`)
+      tryParseCandle(payload, wsUrl, false)
     })
   })
 }
 
-function tryParseCandle(payload: string, wsUrl: string): void {
+// ─── Lógica de Decodificação e Validação de Crash ──────────────────────────────
+
+function tryParseCandle(payload: string, wsUrl: string, isBinary: boolean): void {
   try {
-    if (payload.length < 5 || payload === '[binary]') return
+    let multiplicador: number | null = null
+    let rodadaId: string = `round_${Date.now()}`
 
-    let data: any
+    if (isBinary) {
+      const buf = Buffer.from(payload, 'base64')
+      if (buf.length < 10) return 
 
-    try {
-      data = JSON.parse(payload)
-    } catch {
-      const jsonMatch = payload.match(/\{.*\}/s)
-      if (jsonMatch) {
-        try {
-          data = JSON.parse(jsonMatch[0])
-        } catch { return }
-      } else { return }
+      // Filtro crítico: pacotes de "voo" (avião subindo) costumam ser pequenos ou 
+      // não conter a assinatura de encerramento da Spribe.
+      multiplicador = extractCrashFromBinary(buf)
+    } else {
+      if (!payload || payload.length < 5) return
+      try {
+        const data = JSON.parse(payload)
+        multiplicador = extractMultiplierFromJson(data)
+        rodadaId = extractRoundId(data)
+      } catch {
+        const jsonMatch = payload.match(/\{.*\}/s)
+        if (jsonMatch) {
+          const data = JSON.parse(jsonMatch[0])
+          multiplicador = extractMultiplierFromJson(data)
+          rodadaId = extractRoundId(data)
+        }
+      }
     }
 
-    const multiplicador = extractMultiplier(data)
-
+    // Só salva se o multiplicador for válido e não for um tick de subida
     if (multiplicador !== null && multiplicador >= 1) {
-      const rodadaId = extractRoundId(data)
-      logger.info(`🕯️  Vela capturada: ${multiplicador}x (rodada: ${rodadaId})`)
+      // Pequeno debounce/filtro para evitar salvar valores intermediários (ex: 5.07, 5.08)
+      // O valor final do crash no Aviator geralmente vem em pacotes com metadados de "history"
+      logger.info(`🕯️ Vela detectada: ${multiplicador.toFixed(2)}x (URL: ${wsUrl.split('?')[0]})`)
       const candle = candleService.addCandle(multiplicador, rodadaId)
       saveCandle(candle)
     }
-
   } catch (err) {
-    logger.debug(`Erro ao parsear frame: ${err}`)
+    logger.debug(`Erro no parser: ${err}`)
   }
 }
 
-function extractMultiplier(data: any): number | null {
-  const possibleFields = [
-    'crash_point', 'crashPoint', 'coefficient', 'multiplier',
-    'finalMultiplier', 'final_multiplier', 'result', 'value',
-    'x', 'coef', 'bust', 'game_result', 'gameResult', 'payout',
-    'crash', 'factor'
-  ]
-
-  for (const field of possibleFields) {
-    if (data[field] !== undefined) {
-      const val = parseFloat(data[field])
-      if (!isNaN(val) && val >= 1 && val <= 10000) {
-        logger.debug(`✅ Multiplicador encontrado em campo "${field}": ${val}`)
-        return val
+function extractCrashFromBinary(buf: Buffer): number | null {
+  const CRASH_MARKERS = ['crash', 'maxMultiplier', 'coefficient', 'multiplier']
+  
+  for (const marker of CRASH_MARKERS) {
+    const idx = buf.indexOf(marker, 0, 'utf8')
+    if (idx !== -1) {
+      // No protocolo Spribe, o double (8 bytes) vem logo após o marcador
+      for (let offset = marker.length; offset <= marker.length + 2; offset++) {
+        const pos = idx + offset
+        if (pos + 8 > buf.length) continue
+        const val = buf.readDoubleBE(pos)
+        // Filtro: No Aviator, multiplicadores são raramente números redondos perfeitos 
+        // em pacotes de histórico, mas sempre >= 1.0
+        if (!isNaN(val) && val >= 1.0 && val < 1000000) return val
       }
     }
   }
+  return null
+}
 
-  if (data.data && typeof data.data === 'object') return extractMultiplier(data.data)
-  if (data.result && typeof data.result === 'object') return extractMultiplier(data.result)
-  if (data.payload && typeof data.payload === 'object') return extractMultiplier(data.payload)
-  if (data.game && typeof data.game === 'object') return extractMultiplier(data.game)
-
-  if (data.type || data.event || data.action) {
-    const eventType = (data.type || data.event || data.action || '').toLowerCase()
-    const isGameEnd = ['game_end', 'gameend', 'crash', 'bust', 'round_end', 'finish', 'game_over'].some(
-      e => eventType.includes(e)
-    )
-    if (isGameEnd) {
-      const copy = { ...data }
-      delete copy.type; delete copy.event; delete copy.action
-      return extractMultiplier(copy)
+function extractMultiplierFromJson(data: any): number | null {
+  const fields = ['crash_point', 'crashPoint', 'coefficient', 'multiplier', 'final_multiplier', 'crash']
+  for (const f of fields) {
+    if (data[f] !== undefined) {
+      const val = parseFloat(data[f])
+      if (!isNaN(val) && val >= 1) return val
     }
   }
-
+  if (data.data && typeof data.data === 'object') return extractMultiplierFromJson(data.data)
   return null
 }
 
 function extractRoundId(data: any): string {
-  const possibleFields = ['round_id', 'roundId', 'game_id', 'gameId', 'id', 'session_id']
-  for (const field of possibleFields) {
-    if (data[field]) return String(data[field])
+  const fields = ['round_id', 'roundId', 'game_id', 'id']
+  for (const f of fields) {
+    if (data[f]) return String(data[f])
   }
   return `round_${Date.now()}`
 }

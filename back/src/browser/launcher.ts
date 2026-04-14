@@ -12,7 +12,7 @@ let browser: Browser | null = null
 let context: BrowserContext | null = null
 let page: Page | null = null
 
-// ✅ Script injetado em TODOS os frames (incluindo cross-origin) antes do JS deles rodar
+// ✅ Interceptor corrigido: captura frames BINÁRIOS convertendo para base64
 const WS_INTERCEPTOR_SCRIPT = `(function() {
   if (window.__wsInterceptorActive) return;
   window.__wsInterceptorActive = true;
@@ -30,13 +30,56 @@ const WS_INTERCEPTOR_SCRIPT = `(function() {
 
     ws.addEventListener('message', function(event) {
       try {
-        var payload = typeof event.data === 'string' ? event.data : '[binary]';
+        var payload;
+        var isBinary = false;
+
+        if (typeof event.data === 'string') {
+          payload = event.data.substring(0, 4000);
+        } else if (event.data instanceof ArrayBuffer) {
+          // Converte ArrayBuffer para base64 para passar ao Node
+          var bytes = new Uint8Array(event.data);
+          var binary = '';
+          for (var i = 0; i < bytes.byteLength; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          payload = btoa(binary);
+          isBinary = true;
+        } else if (event.data instanceof Blob) {
+          // Blob: lê de forma assíncrona
+          var reader = new FileReader();
+          var capturedUrl = wsUrl;
+          reader.onload = function() {
+            try {
+              var ab = reader.result;
+              var bytes2 = new Uint8Array(ab);
+              var bin2 = '';
+              for (var j = 0; j < bytes2.byteLength; j++) {
+                bin2 += String.fromCharCode(bytes2[j]);
+              }
+              window.__wsMessages.push({
+                url: capturedUrl,
+                payload: btoa(bin2),
+                isBinary: true,
+                timestamp: new Date().toISOString()
+              });
+              if (window.__wsMessages.length > 200) {
+                window.__wsMessages.shift();
+              }
+            } catch(e2) {}
+          };
+          reader.readAsArrayBuffer(event.data);
+          return; // sai — vai ser adicionado no callback
+        } else {
+          payload = String(event.data).substring(0, 4000);
+        }
+
         window.__wsMessages.push({
           url: wsUrl,
-          payload: payload.substring(0, 2000),
+          payload: payload,
+          isBinary: isBinary,
           timestamp: new Date().toISOString()
         });
-        if (window.__wsMessages.length > 100) {
+        if (window.__wsMessages.length > 200) {
           window.__wsMessages.shift();
         }
       } catch(e) {}
