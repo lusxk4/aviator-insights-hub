@@ -9,85 +9,76 @@ export function getRawFrames() { return []; }
 export function getDetectedWSUrls() { return []; }
 
 /**
- * Inicia a interceptação Híbrida (Barra de Histórico + WebSocket Realtime)
+ * Inicia a interceptação Híbrida (Histórico da Barra + WebSocket Realtime)
  */
 export async function startInterception(page: Page): Promise<void> {
-  logger.info('🔍 Iniciando interceptação Híbrida (Histórico + Realtime)...')
+  logger.info('🔍 Iniciando interceptação Híbrida FINAL...')
   
-  // 1. Monitoramento via WebSocket (Para pegar a vela no exato momento do crash)
+  // 1. WebSocket Nativo (Interceptação de baixo nível)
   page.on('websocket', ws => {
     if (ws.url().includes('aviator') || ws.url().includes('p-j-0-h')) {
-      ws.on('framereceived', f => tryParseCandle(f.payload.toString(), false));
+      ws.on('framereceived', f => {
+        // Tratamos sempre como Buffer para não corromper o binário
+        const payload = Buffer.isBuffer(f.payload) ? f.payload : Buffer.from(f.payload);
+        tryParseCandle(payload);
+      });
     }
   });
 
-  // 2. Reinicia o iframe para garantir contexto limpo
   const frame = await forceReloadGameIframe(page);
   
   if (frame) {
-    // 3. Sincroniza o histórico VISUAL (as bolinhas que já estão lá)
+    // 2. Sincroniza o que já está na tela (bolinhas coloridas)
     await scrapeHistory(frame);
     
-    // 4. Mantém o polling para mensagens injetadas via Launcher
+    // 3. Polling interno de segurança (Redundância)
     startPolling(frame);
   }
 
-  // Proteção para reconexão em caso de navegação
-  page.on('frameattached', f => setTimeout(() => startPolling(f), 2000));
-  page.on('framenavigated', f => setTimeout(() => startPolling(f), 1000));
+  // Se o usuário der F5, o bot se reanexa automaticamente
+  page.on('framenavigated', f => {
+    if (f.url().includes('p-j-0-h')) {
+      logger.info('🔄 Navegação detectada, reativando monitoramento...');
+      setTimeout(() => startPolling(f), 2000);
+    }
+  });
 
-  logger.info('✅ Sistema Híbrido Ativo!');
+  logger.info('✅ Monitoramento total ativo!');
 }
 
 /**
- * Lê a barra de histórico (bolinhas coloridas) para popular o banco inicialmente
+ * Scrape das bolinhas que já aparecem no topo do jogo
  */
 async function scrapeHistory(frame: Frame) {
-  logger.info('📜 Sincronizando histórico real da barra de bolinhas...');
+  logger.info('📜 Sincronizando histórico visual da barra...');
   try {
-    // Aguarda o carregamento visual dos elementos
     await frame.waitForTimeout(5000);
-
     const historyData = await frame.evaluate(() => {
-      // Seletores específicos da barra de histórico do Aviator
-      const selectors = '.payouts-block .payout, .stats-list .payout, .history-item, .bubble-multiplier';
+      // Seletores padrão do Aviator para a barra de histórico
+      const selectors = '.payouts-block .payout, .stats-list .payout, .bubble-multiplier';
       const items = Array.from(document.querySelectorAll(selectors));
-      
       return items.map(el => {
         const text = el.textContent?.trim() || '';
         const val = parseFloat(text.replace('x', ''));
-        if (!isNaN(val) && val > 0) {
-          return {
-            val: val,
-            id: `hist_${val}_${Math.random().toString(36).substr(2, 5)}`
-          };
-        }
-        return null;
-      }).filter((item): item is {val: number, id: string} => item !== null);
+        return (!isNaN(val) && val > 0) ? { val, id: `hist_${val}_${Math.random().toString(36).substr(2, 5)}` } : null;
+      }).filter(Boolean);
     });
 
     if (historyData.length > 0) {
-      // Pegamos apenas as últimas 35 para evitar pegar "lixo" de cache
+      // Pegamos as últimas 35 encontradas
       const cleanHistory = historyData.slice(0, 35);
-      logger.info(`📦 Sincronizando ${cleanHistory.length} velas reais encontradas na barra.`);
-      
-      // Inverte para salvar na ordem cronológica correta no banco
+      logger.info(`📦 Sucesso! ${cleanHistory.length} velas sincronizadas do histórico.`);
       for (const item of cleanHistory.reverse()) {
-        const candle = candleService.addCandle(item.val, item.id);
+        const candle = candleService.addCandle(item!.val, item!.id);
         await saveCandle(candle);
       }
-    } else {
-      logger.warn('⚠️ Não foi possível ler a barra de histórico. O jogo pode estar em carregamento.');
     }
-  } catch (err: any) {
-    logger.error(`❌ Erro no Scrape: ${err.message}`);
-  }
+  } catch (err) {}
 }
 
 async function forceReloadGameIframe(page: Page): Promise<Frame | null> {
   try {
-    logger.info('🔄 Preparando contexto do jogo...');
-    const frameFound = await page.evaluate(() => {
+    await page.evaluate(() => {
       const gameIframe = Array.from(document.querySelectorAll('iframe')).find(f =>
         f.src && (f.src.includes('p-j-0-h') || f.src.includes('aviator'))
       ) as HTMLIFrameElement;
@@ -95,14 +86,10 @@ async function forceReloadGameIframe(page: Page): Promise<Frame | null> {
         const src = gameIframe.src;
         gameIframe.src = '';
         setTimeout(() => { gameIframe.src = src; }, 100);
-        return true;
       }
-      return false;
     });
-    
     await page.waitForTimeout(6000);
-    const frames = page.frames();
-    return frames.find(f => f.url().includes('p-j-0-h') || f.url().includes('aviator')) || null;
+    return page.frames().find(f => f.url().includes('p-j-0-h') || f.url().includes('aviator')) || null;
   } catch (err) { return null; }
 }
 
@@ -116,7 +103,6 @@ function startPolling(frame: Frame): void {
   const interval = setInterval(async () => {
     try {
       if (frame.isDetached()) return clearInterval(interval);
-
       const messages = await frame.evaluate((idx) => {
         const msgs = (window as any).__wsMessages || [];
         return msgs.slice(idx);
@@ -125,7 +111,8 @@ function startPolling(frame: Frame): void {
       if (messages && messages.length > 0) {
         lastIndex += messages.length;
         for (const msg of messages) {
-          tryParseCandle(msg.payload, msg.isBinary);
+          const payload = msg.isBinary ? Buffer.from(msg.payload, 'base64') : Buffer.from(msg.payload);
+          tryParseCandle(payload);
         }
       }
     } catch (e) {
@@ -135,42 +122,60 @@ function startPolling(frame: Frame): void {
   }, 400);
 }
 
-function tryParseCandle(payload: string, isBinary: boolean): void {
+// ─── PARSER DE ALTA PRECISÃO ─────────────────────────────────────────────────
+
+function tryParseCandle(buf: Buffer): void {
   try {
     let mult: number | null = null;
     let rId: string | null = null;
+    const payloadStr = buf.toString('utf8');
 
-    if (isBinary) {
-      const buf = Buffer.from(payload, 'base64');
-      if (buf.length < 15) return;
-      const markers = ['crash', 'maxMultiplier', 'final_multiplier'];
+    // 1. Tenta extrair via JSON (Texto plano)
+    if (payloadStr.trim().startsWith('{')) {
+      try {
+        const data = JSON.parse(payloadStr);
+        // Regra de Ouro: Ignora pacotes do tipo 'f' (fly/subindo)
+        if (data.type === 'f' || data.type === 'stage') return;
+        
+        mult = data.crash || data.multiplier || (data.data && data.data.multiplier);
+        rId = data.round_id || data.id || (data.data && data.data.id);
+      } catch (e) {}
+    }
+
+    // 2. Tenta extrair via Binário (Protocolo Spribe)
+    if (mult === null && buf.length > 35) {
+      // Só procuramos o multiplicador se o pacote for de encerramento (crash/history)
+      const markers = ['crash', 'maxMultiplier', 'history'];
       for (const m of markers) {
         const idx = buf.indexOf(m, 0, 'utf8');
         if (idx !== -1) {
-          mult = buf.readDoubleBE(idx + m.length);
-          const idIdx = buf.indexOf('id', 0, 'utf8');
-          if (idIdx !== -1) rId = buf.slice(idIdx + 2, idIdx + 14).toString('utf8').replace(/[^a-zA-Z0-9]/g, '');
-          break;
+          // O valor final é sempre um Double (8 bytes) Big Endian após o marcador
+          const val = buf.readDoubleBE(idx + m.length);
+          if (!isNaN(val) && val >= 1.0 && val < 50000) {
+            mult = Number(val.toFixed(2));
+            // Busca o ID da rodada para validar que NÃO é um tick de subida
+            const idIdx = buf.indexOf('id', 0, 'utf8');
+            if (idIdx !== -1) {
+              rId = buf.slice(idIdx + 2, idIdx + 14).toString('utf8').replace(/[^a-zA-Z0-9]/g, '');
+            }
+            break;
+          }
         }
       }
-    } else {
-      const trimmed = payload.trim();
-      if (!trimmed.startsWith('{')) return;
-      const data = JSON.parse(trimmed);
-      
-      // Filtro Spribe: ignore pacotes de 'type': 'f' (fly/voo), aceite 'v' (valor final)
-      if (data.type === 'f') return;
-
-      mult = data.crash || data.multiplier || (data.data && data.data.multiplier);
-      rId = data.round_id || data.id || (data.data && data.data.id);
     }
 
+    // SALVAMENTO ÚNICO: Só salva se tiver MULTIPLICADOR e um ID DE RODADA
     if (mult && mult >= 1 && rId) {
+      // Se o ID for igual ao último, é duplicata do mesmo pacote. Ignora.
       if (rId === GLOBAL_LAST_ROUND_ID) return;
+      
       GLOBAL_LAST_ROUND_ID = rId;
-      logger.info(`🕯️ Vela Detectada (Realtime): ${mult.toFixed(2)}x`);
+
+      logger.info(`🕯️ Vela Realtime Detectada: ${mult.toFixed(2)}x (Round: ${rId})`);
       const candle = candleService.addCandle(mult, rId);
       saveCandle(candle);
     }
-  } catch (err) {}
-}  
+  } catch (err) {
+    // Silencia erros binários para não poluir o terminal
+  }
+}
