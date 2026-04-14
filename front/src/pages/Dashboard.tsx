@@ -4,7 +4,8 @@ import { detectarPadroes, corParaLabel } from '@/utils/candleUtils'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Brush, ReferenceLine, PieChart, Pie, Cell } from 'recharts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Skeleton } from '@/skeleton' // Ajuste o path se necessário
+// CORREÇÃO: O caminho correto para o Skeleton do Shadcn
+import { Skeleton } from '@/components/ui/skeleton' 
 import { Download, Upload } from 'lucide-react'
 import ImportModal from '@/components/ImportModal'
 import { format, isValid } from 'date-fns'
@@ -17,7 +18,6 @@ export default function DashboardPage() {
   const [importOpen, setImportOpen] = useState(false)
   const { candles, stats, loading } = useCandles({ limit })
 
-  // 1. Correção: Garantir que as velas estejam ordenadas por data para o gráfico (Antigas -> Novas)
   const sortedCandles = useMemo(() => {
     return [...candles].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
   }, [candles])
@@ -65,7 +65,6 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6 pb-20 lg:pb-0 p-4">
-      {/* Filtros e Ações */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex gap-1 bg-white/5 rounded-lg p-1 border border-white/10">
           {LIMITS.map(l => (
@@ -85,7 +84,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Cards de Métricas Principais */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard label="Total de velas" value={stats?.total?.toString() || '0'} />
         <MetricCard label="Maior multiplicador" value={`${stats?.maior?.toFixed(2) || '1.00'}x`}
@@ -98,7 +96,6 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Gráfico Principal de Áreas */}
       <div className="glass-card p-6 border border-white/10 bg-white/5 rounded-xl">
         <h3 className="text-sm font-medium text-foreground mb-6">Tendência de Mercado</h3>
         <div className="h-[300px] w-full">
@@ -133,7 +130,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Distribuição e Donut Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         {(['blue', 'purple', 'pink'] as const).map(cor => {
           const s = stats?.[cor] || { percent: 0, count: 0 }
@@ -161,7 +157,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Tabela de Histórico Recente (Inversa - Novas primeiro) */}
       <div className="glass-card border border-white/10 bg-white/5 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-white/5 border-b border-white/10">

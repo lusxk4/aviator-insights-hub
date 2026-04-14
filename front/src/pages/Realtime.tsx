@@ -1,13 +1,13 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useWS } from '@/contexts/WebSocketContext'
 import { useCandles } from '@/hooks/useCandles'
-import { calcularCor, corParaLabel } from '@/utils/candleUtils'
+import { corParaLabel } from '@/utils/candleUtils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip } from 'recharts'
 import { motion, AnimatePresence } from 'framer-motion'
-import { formatDistanceToNow, isValid } from 'date-fns' // Adicionado isValid
+import { formatDistanceToNow, isValid } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
 import { toast } from 'sonner'
 
@@ -19,25 +19,46 @@ export default function RealtimePage() {
   const [manualValue, setManualValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // 1. Correção: Garante que dbCandles e ws.candles sejam arrays antes de filtrar
-  const safeDbCandles = Array.isArray(dbCandles) ? dbCandles : []
-  const safeWsCandles = Array.isArray(ws?.candles) ? ws.candles : []
+  // 1. Memoização para evitar re-calculos pesados e garantir arrays válidos
+  const allCandles = useMemo(() => {
+    const safeDb = Array.isArray(dbCandles) ? dbCandles : []
+    const safeWs = Array.isArray(ws?.candles) ? ws.candles : []
+    
+    // Combina removendo duplicatas por ID ou Rodada
+    const combined = [...safeDb]
+    safeWs.forEach(wc => {
+      if (!combined.find(dc => dc.id === wc.id || dc.rodada_id === wc.rodada_id)) {
+        combined.push(wc)
+      }
+    })
+    return combined
+  }, [dbCandles, ws?.candles])
 
-  const allCandles = [...safeDbCandles, ...safeWsCandles.filter(wc => !safeDbCandles.find(dc => dc.id === wc.id || dc.rodada_id === wc.rodada_id))]
-  
-  // 2. Ordenação por tempo para garantir que o feed faça sentido
-  const recentCandles = [...allCandles]
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 20)
+  // 2. Ordenação rigorosa por data (Mais recentes primeiro para o Feed)
+  const recentCandles = useMemo(() => {
+    return [...allCandles]
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 20)
+  }, [allCandles])
 
-  const chartCandles = [...allCandles]
-    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-    .slice(-30)
+  // 3. Ordenação para o gráfico (Mais antigas para as mais novas)
+  const barData = useMemo(() => {
+    return [...allCandles]
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      .slice(-30)
+      .map((c, i) => ({
+        index: i,
+        mult: Number(c.multiplicador),
+        cor: c.cor || 'blue'
+      }))
+  }, [allCandles])
 
   useEffect(() => {
-    if (!ws?.lastCandle) return
-    if (ws.lastCandle.cor === 'pink') {
-      toast('🌸 Rosa detectada!', { description: `${ws.lastCandle.multiplicador.toFixed(2)}x` })
+    if (ws?.lastCandle?.cor === 'pink') {
+      toast.success('🌸 Rosa detectada!', { 
+        description: `${Number(ws.lastCandle.multiplicador).toFixed(2)}x`,
+        duration: 5000 
+      })
     }
   }, [ws?.lastCandle])
 
@@ -45,63 +66,66 @@ export default function RealtimePage() {
     e.preventDefault()
     const val = parseFloat(manualValue)
     if (isNaN(val) || val <= 0) return
-    await addCandle(val, 'manual')
-    setManualValue('')
+    try {
+      await addCandle(val, 'manual')
+      setManualValue('')
+      toast.success('Vela adicionada manualmente')
+    } catch (err) {
+      toast.error('Erro ao salvar vela')
+    }
     inputRef.current?.focus()
   }
 
-  const barData = chartCandles.map((c, i) => ({ 
-    index: i, 
-    mult: c.multiplicador, 
-    cor: c.cor || 'blue' 
-  }))
-
   return (
-    <div className="space-y-6 pb-20 lg:pb-0">
-      {/* Status */}
-      <div className="glass-card p-6">
+    <div className="space-y-6 pb-20 lg:pb-0 p-4">
+      {/* Status do Servidor */}
+      <div className="glass-card p-6 border border-white/10 bg-white/5 rounded-xl">
         <div className="flex items-center gap-4">
-          <div className={`h-4 w-4 rounded-full ${ws?.connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-          <div>
-            <h2 className="text-lg font-semibold text-foreground">
-              {ws?.connected ? 'Conectado ao servidor' : 'Servidor desconectado'}
+          <div className={`h-4 w-4 rounded-full ${ws?.connected ? 'bg-green-500 animate-pulse' : 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]'}`} />
+          <div className="flex-1">
+            <h2 className="text-lg font-bold text-foreground">
+              {ws?.connected ? 'Servidor Online' : 'Servidor Offline'}
             </h2>
             <p className="text-sm text-muted-foreground">
               {ws?.connected 
-                ? `${ws?.status?.totalCaptured || 0} velas capturadas` 
-                : 'Inicie o bot para começar a interceptação'}
+                ? `${ws?.status?.totalCaptured || 0} velas interceptadas nesta sessão` 
+                : 'O bot de captura não está respondendo'}
             </p>
           </div>
+          {!ws?.connected && (
+             <Button variant="outline" size="sm" onClick={() => window.location.reload()}>Recarregar</Button>
+          )}
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Feed ao vivo */}
-        <div className="glass-card p-4 space-y-3">
-          <h3 className="text-sm font-medium text-foreground">Feed ao vivo</h3>
-          <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2">
+        {/* Feed em Tempo Real */}
+        <div className="glass-card p-4 space-y-3 border border-white/10 bg-white/5 rounded-xl">
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Monitoramento ao vivo</h3>
+          <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
             <AnimatePresence initial={false}>
               {recentCandles.map((c, i) => {
-                // 3. Proteção para a data: Se a data for inválida, não quebra a tela
                 const date = new Date(c.created_at)
                 const timeAgo = isValid(date) 
                   ? formatDistanceToNow(date, { addSuffix: true, locale: ptBR })
                   : 'Agora'
 
                 return (
-                  <motion.div key={c.id || c.rodada_id || i}
-                    initial={{ opacity: 0, x: -20 }} 
-                    animate={{ opacity: 1, x: 0 }} 
-                    className={`flex items-center gap-3 p-3 rounded-lg ${i === 0 ? 'border-2 bg-white/5' : 'bg-white/5'}`}
-                    style={i === 0 ? { borderColor: COLORS[c.cor as keyof typeof COLORS] } : {}}
+                  <motion.div 
+                    key={c.id || c.rodada_id || i}
+                    initial={{ opacity: 0, y: -10 }} 
+                    animate={{ opacity: 1, y: 0 }} 
+                    className={`flex items-center gap-4 p-4 rounded-xl transition-all ${i === 0 ? 'bg-white/10 ring-1 ring-white/20' : 'bg-white/5'}`}
                   >
-                    <span className="text-xl font-bold font-mono" style={{ color: COLORS[c.cor as keyof typeof COLORS] }}>
-                      {Number(c.multiplicador).toFixed(2)}x
-                    </span>
-                    <Badge variant="outline" style={{ borderColor: COLORS[c.cor as keyof typeof COLORS], color: COLORS[c.cor as keyof typeof COLORS] }}>
+                    <div className="flex flex-col">
+                      <span className="text-2xl font-black font-mono tracking-tighter" style={{ color: COLORS[c.cor as keyof typeof COLORS] }}>
+                        {Number(c.multiplicador).toFixed(2)}x
+                      </span>
+                    </div>
+                    <Badge variant="outline" className="font-bold" style={{ borderColor: COLORS[c.cor as keyof typeof COLORS], color: COLORS[c.cor as keyof typeof COLORS] }}>
                       {corParaLabel(c.cor)}
                     </Badge>
-                    <span className="text-xs text-muted-foreground ml-auto">
+                    <span className="text-[10px] uppercase font-medium text-muted-foreground ml-auto">
                       {timeAgo}
                     </span>
                   </motion.div>
@@ -109,19 +133,34 @@ export default function RealtimePage() {
               })}
             </AnimatePresence>
             {recentCandles.length === 0 && (
-              <p className="text-sm text-muted-foreground text-center py-8">Aguardando sinais do bot...</p>
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <p className="text-muted-foreground animate-pulse">Aguardando sinais do bot...</p>
+              </div>
             )}
           </div>
         </div>
 
         <div className="space-y-6">
-          {/* Mini gráfico */}
-          <div className="glass-card p-4 h-[250px]">
-            <h3 className="text-sm font-medium text-foreground mb-3">Histórico Recente</h3>
+          {/* Gráfico de Barras Coloridas */}
+          <div className="glass-card p-4 h-[280px] border border-white/10 bg-white/5 rounded-xl">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Volatilidade Recente</h3>
             {barData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={barData}>
-                  <Bar dataKey="mult">
+                <BarChart data={barData} margin={{ top: 0, right: 0, left: -40, bottom: 0 }}>
+                  <Tooltip 
+                    cursor={{fill: 'transparent'}}
+                    content={({ active, payload }) => {
+                      if (active && payload && payload.length) {
+                        return (
+                          <div className="bg-black/80 border border-white/10 p-2 rounded text-xs font-mono">
+                            {payload[0].value}x
+                          </div>
+                        );
+                      }
+                      return null;
+                    }}
+                  />
+                  <Bar dataKey="mult" radius={[4, 4, 0, 0]}>
                     {barData.map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={COLORS[entry.cor as keyof typeof COLORS] || COLORS.blue} />
                     ))}
@@ -129,23 +168,26 @@ export default function RealtimePage() {
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-                Sem dados para o gráfico
+              <div className="flex items-center justify-center h-full text-muted-foreground text-sm italic">
+                Aguardando dados para gerar gráfico...
               </div>
             )}
           </div>
 
-          {/* Entrada manual */}
-          <div className="glass-card p-4 space-y-3">
-            <h3 className="text-sm font-medium text-foreground">Entrada manual</h3>
-            <form onSubmit={handleManualEntry} className="flex gap-2">
+          {/* Input de Segurança (Manual) */}
+          <div className="glass-card p-6 border border-white/10 bg-white/5 rounded-xl space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Entrada de Contingência</h3>
+              <p className="text-xs text-muted-foreground mt-1">Use apenas se a interceptação automática falhar.</p>
+            </div>
+            <form onSubmit={handleManualEntry} className="flex gap-3">
               <Input
                 ref={inputRef}
-                type="number" step="0.01" min="1" placeholder="Ex: 1.50"
+                type="number" step="0.01" min="1" placeholder="Ex: 2.50"
                 value={manualValue} onChange={e => setManualValue(e.target.value)}
-                className="bg-white/5 border-white/10 font-mono"
+                className="bg-white/5 border-white/10 font-mono text-lg h-12"
               />
-              <Button type="submit">Adicionar</Button>
+              <Button type="submit" className="h-12 px-6 bg-blue-600 hover:bg-blue-700">Inserir</Button>
             </form>
           </div>
         </div>
