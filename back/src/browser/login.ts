@@ -1,43 +1,53 @@
 import { Page } from 'playwright'
 import { logger } from '../utils/logger.js'
+import { saveSession } from './launcher.js'
 
-const LOGIN_TIMEOUT_MS = 120000 // 2 minutos para login manual
+const LOGIN_TIMEOUT_MS = 120000
+const GAME_URL = process.env.AVIATOR_DIRECT_URL || `${process.env.BET923_URL}/game/action/6770`
 
 export async function login(page: Page): Promise<boolean> {
   logger.info('🔐 Verificando login...')
 
-  const jaLogado = await isLoggedIn(page)
-  if (jaLogado) {
-    logger.info('✅ Já está logado!')
+  const currentUrl = page.url()
+
+  // ✅ Já está no jogo
+  if (currentUrl.includes('/game/action/')) {
+    logger.info('✅ Já está na página do jogo!')
+    await saveSession()
     return true
   }
 
-  const url = process.env.BET923_URL!
-  logger.info('🌐 Navegando para home...')
-
-  await page.goto(`${url}/main/inicio`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 60000
-  })
-  await page.waitForTimeout(4000)
-
-  const logadoAposNav = await isLoggedIn(page)
-  if (logadoAposNav) {
-    logger.info('✅ Logado via sessão salva!')
+  // ✅ Está logado mas em outra página
+  if (currentUrl.includes('/main/')) {
+    logger.info('✅ Sessão ativa, navegando para o jogo...')
+    await page.goto(GAME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    await saveSession()
     return true
   }
 
-  // Aguardar login manual — fica verificando a cada 5s por até 2 minutos
-  logger.warn('⚠️  Faça login manualmente no Chrome que abriu! Aguardando até 2 minutos...')
-  logger.warn('👉 Entre no site, faça login e aguarde — o bot continua automaticamente!')
+  // ⚠️ Precisa logar manualmente
+  logger.warn('━'.repeat(50))
+  logger.warn('⚠️  Faça login manualmente no Firefox que abriu!')
+  logger.warn(`👉 Após logar, o bot navega sozinho para o jogo`)
+  logger.warn('━'.repeat(50))
 
   const inicio = Date.now()
+
   while (Date.now() - inicio < LOGIN_TIMEOUT_MS) {
     await page.waitForTimeout(5000)
 
-    const logado = await isLoggedIn(page)
-    if (logado) {
-      logger.info('✅ Login manual detectado! Continuando...')
+    const url = page.url()
+
+    if (url.includes('/game/action/')) {
+      logger.info('✅ Já está na página do jogo!')
+      await saveSession()
+      return true
+    }
+
+    if (url.includes('/main/')) {
+      logger.info('✅ Login detectado! Navegando para o jogo...')
+      await page.goto(GAME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      await saveSession()
       return true
     }
 
@@ -46,32 +56,4 @@ export async function login(page: Page): Promise<boolean> {
   }
 
   throw new Error('Timeout: login não realizado em 2 minutos')
-}
-
-async function isLoggedIn(page: Page): Promise<boolean> {
-  try {
-    const selectors = [
-      'button:has-text("Sacar")',
-      'button:has-text("Saque")',
-      'button:has-text("Depositar")',
-      'a:has-text("Perfil")',
-      '[class*="balance"]',
-      '[class*="user-balance"]',
-      '[class*="perfil"]',
-      '[class*="profile"]',
-      '.avatar',
-      '.user-avatar',
-    ]
-
-    for (const selector of selectors) {
-      const el = page.locator(selector).first()
-      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
-        logger.debug(`✅ Login detectado via: ${selector}`)
-        return true
-      }
-    }
-    return false
-  } catch {
-    return false
-  }
 }

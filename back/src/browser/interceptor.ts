@@ -1,24 +1,154 @@
-import { Page } from 'playwright'
+import { Page, Frame } from 'playwright'
 import { logger } from '../utils/logger.js'
 import { candleService } from '../services/candleService.js'
 import { saveCandle } from '../services/supabaseService.js'
 
 const rawFrames: { url: string; payload: string; timestamp: string }[] = []
 const MAX_RAW_FRAMES = 50
+const detectedWSUrls: string[] = []
 
 export function getRawFrames() {
   return rawFrames
 }
 
+export function getDetectedWSUrls(): string[] {
+  return detectedWSUrls
+}
+
 export async function startInterception(page: Page): Promise<void> {
   logger.info('🔍 Iniciando interceptação de WebSockets...')
 
-  const wsUrls: string[] = []
+  // Listener nativo do Playwright (captura WS da página principal, se houver)
+  attachWSListener(page, 'main')
 
+  // ✅ Força reload do iframe do jogo para que o context.addInitScript
+  // (injetado no launcher.ts) rode ANTES do WebSocket do jogo ser criado.
+  // Sem o reload, o iframe já estava carregado antes da injeção.
+  await forceReloadGameIframe(page)
+
+  // Inicia polling em frames já existentes
+  for (const frame of page.frames()) {
+    logger.debug(`Frame encontrado: ${frame.url()}`)
+    tryStartPolling(frame)
+  }
+
+  // Monitora novos frames que aparecerem
+  page.on('frameattached', async (frame) => {
+    logger.debug(`Novo frame anexado: ${frame.url()}`)
+    await new Promise(r => setTimeout(r, 500))
+    tryStartPolling(frame)
+  })
+
+  page.on('framenavigated', async (frame) => {
+    logger.debug(`Frame navegado: ${frame.url()}`)
+    // Pequena espera para o frame inicializar
+    await new Promise(r => setTimeout(r, 200))
+    tryStartPolling(frame)
+  })
+
+  logger.info('✅ Interceptação ativa!')
+}
+
+async function forceReloadGameIframe(page: Page): Promise<void> {
+  try {
+    logger.info('🔄 Recarregando iframe do jogo para ativar interceptor...')
+
+    // Localiza o iframe do jogo e força reload via src
+    await page.evaluate(() => {
+      const iframes = Array.from(document.querySelectorAll('iframe'))
+      const gameIframe = iframes.find(f =>
+        f.src && (
+          f.src.includes('p-j-0-h.com') ||
+          f.src.includes('aviator') ||
+          f.src.includes('spribe')
+        )
+      )
+      if (gameIframe) {
+        const src = gameIframe.src
+        gameIframe.src = ''
+        setTimeout(() => { gameIframe.src = src }, 100)
+      }
+    })
+
+    // Aguarda o iframe recarregar e o jogo conectar ao WebSocket
+    await page.waitForTimeout(8000)
+    logger.info('✅ Iframe recarregado — interceptor ativo antes do WS do jogo!')
+
+  } catch (err) {
+    logger.warn(`⚠️  Falha ao recarregar iframe: ${err} — continuando mesmo assim`)
+  }
+}
+
+function isGameFrame(url: string): boolean {
+  return (
+    url.includes('p-j-0-h.com') ||
+    url.includes('aviator') ||
+    url.includes('spribe')
+  )
+}
+
+function tryStartPolling(frame: Frame): void {
+  const url = frame.url()
+  if (!url || url === 'about:blank') return
+  if (!isGameFrame(url)) return
+
+  logger.info(`🎮 Iniciando polling no frame do jogo: ${url}`)
+  startPolling(frame)
+}
+
+function startPolling(frame: Frame): void {
+  let lastProcessedIndex = 0
+  let consecutiveErrors = 0
+  const MAX_ERRORS = 10
+
+  const interval = setInterval(async () => {
+    try {
+      if (frame.isDetached()) {
+        clearInterval(interval)
+        logger.warn('⚠️  Frame do jogo desanexado, parando polling')
+        return
+      }
+
+      const messages = await frame.evaluate((fromIndex: number) => {
+        const msgs = (window as any).__wsMessages || []
+        return msgs.slice(fromIndex)
+      }, lastProcessedIndex)
+
+      consecutiveErrors = 0 // reset no sucesso
+
+      if (messages && messages.length > 0) {
+        lastProcessedIndex += messages.length
+
+        for (const msg of messages) {
+          const { url, payload, timestamp } = msg
+
+          if (!detectedWSUrls.includes(url)) {
+            detectedWSUrls.push(url)
+            logger.info(`🌐 WebSocket detectado (iframe): ${url}`)
+          }
+
+          rawFrames.unshift({ url, payload: payload.substring(0, 500), timestamp })
+          if (rawFrames.length > MAX_RAW_FRAMES) rawFrames.pop()
+
+          logger.debug(`📨 Frame recebido [iframe]: ${payload.substring(0, 200)}`)
+          tryParseCandle(payload, url)
+        }
+      }
+    } catch (err) {
+      consecutiveErrors++
+      if (consecutiveErrors >= MAX_ERRORS) {
+        clearInterval(interval)
+        logger.warn(`⚠️  Polling encerrado após ${MAX_ERRORS} erros consecutivos`)
+      }
+    }
+  }, 500)
+}
+
+function attachWSListener(page: Page, label: string): void {
   page.on('websocket', ws => {
     const wsUrl = ws.url()
-    wsUrls.push(wsUrl)
-    logger.info(`🌐 WebSocket detectado: ${wsUrl}`)
+    if (!detectedWSUrls.includes(wsUrl)) detectedWSUrls.push(wsUrl)
+    logger.info(`🌐 WebSocket detectado (${label}): ${wsUrl}`)
 
     ws.on('framereceived', frame => {
       const payload = frame.payload.toString()
@@ -31,7 +161,6 @@ export async function startInterception(page: Page): Promise<void> {
       if (rawFrames.length > MAX_RAW_FRAMES) rawFrames.pop()
 
       logger.debug(`📨 Frame recebido [${wsUrl.split('/').pop()}]: ${payload.substring(0, 200)}`)
-
       tryParseCandle(payload, wsUrl)
     })
 
@@ -43,21 +172,11 @@ export async function startInterception(page: Page): Promise<void> {
       logger.warn(`⚠️  WebSocket fechado: ${wsUrl}`)
     })
   })
-
-  page.frames().forEach(frame => {
-    logger.debug(`Frame encontrado: ${frame.url()}`)
-  })
-
-  page.on('frameattached', frame => {
-    logger.debug(`Novo frame anexado: ${frame.url()}`)
-  })
-
-  logger.info('✅ Interceptação ativa!')
 }
 
 function tryParseCandle(payload: string, wsUrl: string): void {
   try {
-    if (payload.length < 5) return
+    if (payload.length < 5 || payload === '[binary]') return
 
     let data: any
 
@@ -68,18 +187,15 @@ function tryParseCandle(payload: string, wsUrl: string): void {
       if (jsonMatch) {
         try {
           data = JSON.parse(jsonMatch[0])
-        } catch {
-          return
-        }
-      } else {
-        return
-      }
+        } catch { return }
+      } else { return }
     }
 
     const multiplicador = extractMultiplier(data)
 
     if (multiplicador !== null && multiplicador >= 1) {
       const rodadaId = extractRoundId(data)
+      logger.info(`🕯️  Vela capturada: ${multiplicador}x (rodada: ${rodadaId})`)
       const candle = candleService.addCandle(multiplicador, rodadaId)
       saveCandle(candle)
     }
@@ -107,10 +223,10 @@ function extractMultiplier(data: any): number | null {
     }
   }
 
-  if (data.data) return extractMultiplier(data.data)
-  if (data.result) return extractMultiplier(data.result)
-  if (data.payload) return extractMultiplier(data.payload)
-  if (data.game) return extractMultiplier(data.game)
+  if (data.data && typeof data.data === 'object') return extractMultiplier(data.data)
+  if (data.result && typeof data.result === 'object') return extractMultiplier(data.result)
+  if (data.payload && typeof data.payload === 'object') return extractMultiplier(data.payload)
+  if (data.game && typeof data.game === 'object') return extractMultiplier(data.game)
 
   if (data.type || data.event || data.action) {
     const eventType = (data.type || data.event || data.action || '').toLowerCase()
@@ -118,8 +234,9 @@ function extractMultiplier(data: any): number | null {
       e => eventType.includes(e)
     )
     if (isGameEnd) {
-      logger.debug(`Evento de fim de rodada detectado: ${eventType}`)
-      return extractMultiplier({ ...data, type: undefined, event: undefined })
+      const copy = { ...data }
+      delete copy.type; delete copy.event; delete copy.action
+      return extractMultiplier(copy)
     }
   }
 
@@ -132,8 +249,4 @@ function extractRoundId(data: any): string {
     if (data[field]) return String(data[field])
   }
   return `round_${Date.now()}`
-}
-
-export function getDetectedWSUrls(): string[] {
-  return []
 }

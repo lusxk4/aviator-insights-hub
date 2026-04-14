@@ -1,95 +1,61 @@
 import { Page } from 'playwright'
 import { logger } from '../utils/logger.js'
-import { retry } from '../utils/retry.js'
+
+const GAME_URL = process.env.AVIATOR_DIRECT_URL || `${process.env.BET923_URL}/game/action/6770`
 
 export async function navigateToAviator(page: Page): Promise<void> {
-  logger.info('🛩️  Navegando para o Aviator...')
+  logger.info('🛩️  Verificando página do Aviator...')
 
-  const url = process.env.BET923_URL!
+  const currentUrl = page.url()
 
-  await retry(async () => {
-    // Navegar para home primeiro
-    logger.info('📄 Carregando home...')
-    await page.goto(`${url}/main/inicio`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000
-    })
-    await page.waitForTimeout(4000)
+  if (currentUrl.includes('/game/action/')) {
+    logger.info(`✅ Já na página do jogo: ${currentUrl}`)
+    await waitForGameIframe(page)
+    return
+  }
 
-    // Tirar screenshot para ver o que está na tela
-    await page.screenshot({ path: 'logs/debug-home.png' })
-    logger.info('📸 Screenshot da home salvo em logs/debug-home.png')
+  logger.info(`🌐 Navegando para: ${GAME_URL}`)
+  await page.goto(GAME_URL, {
+    waitUntil: 'domcontentloaded',
+    timeout: 60000
+  })
 
-    // Tentar clicar no Aviator
-    const aviatorSelectors = [
-      'a:has-text("Aviator")',
-      'div:has-text("Aviator")',
-      'span:has-text("Aviator")',
-      'img[alt*="aviator" i]',
-      'img[src*="aviator" i]',
-      '[class*="aviator" i]',
-      '[data-game*="aviator" i]',
-      '[title*="aviator" i]',
-    ]
+  await page.waitForTimeout(3000)
 
-    for (const selector of aviatorSelectors) {
-      const el = page.locator(selector).first()
-      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
-        logger.info(`✅ Aviator encontrado via: ${selector}`)
-        await el.click()
-        await page.waitForTimeout(5000)
-        return
-      }
-    }
+  const urlAposNav = page.url()
+  logger.info(`📍 URL após navegação: ${urlAposNav}`)
 
-    // Tentar campo de busca
-    logger.warn('⚠️  Aviator não encontrado no menu, tentando busca...')
-    const searchSelectors = [
-      'input[placeholder*="buscar" i]',
-      'input[placeholder*="search" i]',
-      'input[placeholder*="pesquisar" i]',
-      'input[type="search"]',
-      '[class*="search"] input',
-    ]
+  if (!urlAposNav.includes('/game/action/') && !urlAposNav.includes('aviator')) {
+    throw new Error(`Redirecionado para URL inesperada: ${urlAposNav} — verifique se está logado`)
+  }
 
-    for (const sel of searchSelectors) {
-      const searchInput = page.locator(sel).first()
-      if (await searchInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await searchInput.fill('Aviator')
-        await page.waitForTimeout(2000)
-        await page.screenshot({ path: 'logs/debug-search.png' })
-
-        const result = page.locator('a:has-text("Aviator"), div:has-text("Aviator")').first()
-        if (await result.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await result.click()
-          await page.waitForTimeout(5000)
-          return
-        }
-      }
-    }
-
-    await page.screenshot({ path: 'logs/debug-not-found.png' })
-    throw new Error('Aviator não encontrado — veja logs/debug-not-found.png')
-
-  }, 3, 5000, 'Navegação para Aviator')
-
+  logger.info('✅ Página do Aviator detectada!')
   await waitForGameIframe(page)
 }
 
 async function waitForGameIframe(page: Page): Promise<void> {
-  logger.info('⏳ Aguardando iframe do jogo...')
+  logger.info('⏳ Aguardando iframe do jogo carregar...')
 
   try {
     await page.waitForSelector('iframe', { timeout: 60000 })
-    await page.waitForTimeout(8000)
+
+    // Aguarda o iframe do jogo ter URL válida
+    await page.waitForFunction(() => {
+      const frames = Array.from(document.querySelectorAll('iframe'))
+      return frames.some(f => f.src && f.src.includes('p-j-0-h.com'))
+    }, { timeout: 60000 }).catch(() => {
+      logger.warn('⚠️  Iframe do jogo não confirmado via src, continuando mesmo assim...')
+    })
+
+    await page.waitForTimeout(3000)
 
     const frames = page.frames()
     logger.info(`📦 Total de frames: ${frames.length}`)
     frames.forEach(f => logger.debug(`  → Frame: ${f.url()}`))
 
-    logger.info('✅ Iframe do jogo carregado!')
+    logger.info('✅ Jogo carregado!')
   } catch {
-    await page.screenshot({ path: 'logs/debug-iframe.png' })
+    await page.screenshot({ path: 'logs/debug-iframe.png' }).catch(() => {})
     throw new Error('Iframe não encontrado — veja logs/debug-iframe.png')
   }
 }

@@ -5,12 +5,12 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "debug": "cross-env HEADLESS=false tsx src/index.ts"
+    "debug": "tsx src/index.ts",
+    "chrome": "start chrome --remote-debugging-port=9222 --profile-directory=Default"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2",
     "axios": "^1",
-    "chrome-remote-interface": "^0.34.0",
     "cors": "^2",
     "dotenv": "^16",
     "express": "^4",
