@@ -13,35 +13,53 @@ import { toast } from 'sonner'
 
 const COLORS = { blue: 'hsl(217,91%,60%)', purple: 'hsl(263,70%,58%)', pink: 'hsl(330,80%,60%)' }
 
+// Deduplicação no front: agrupa por multiplicador+janela de 2s
+// Evita que velas do WS e do banco apareçam duplicadas na tela
+function deduplicateCandles(candles: any[]): any[] {
+  const seen = new Map<string, boolean>();
+  const result: any[] = [];
+
+  // Ordena do mais antigo ao mais novo para o dedup funcionar corretamente
+  const sorted = [...candles].sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+  );
+
+  for (const candle of sorted) {
+    const mult = Number(candle.multiplicador).toFixed(2);
+    const bucket = Math.floor(new Date(candle.created_at).getTime() / 2000); // janela de 2s
+    const key = `${mult}_${bucket}`;
+    if (!seen.has(key)) {
+      seen.set(key, true);
+      result.push(candle);
+    }
+  }
+
+  return result;
+}
+
 export default function RealtimePage() {
   const ws = useWS()
   const { addCandle, candles: dbCandles } = useCandles({ limit: 30 })
   const [manualValue, setManualValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // 1. Memoização para evitar re-calculos pesados e garantir arrays válidos
   const allCandles = useMemo(() => {
     const safeDb = Array.isArray(dbCandles) ? dbCandles : []
     const safeWs = Array.isArray(ws?.candles) ? ws.candles : []
-    
-    // Combina removendo duplicatas por ID ou Rodada
-    const combined = [...safeDb]
-    safeWs.forEach(wc => {
-      if (!combined.find(dc => dc.id === wc.id || dc.rodada_id === wc.rodada_id)) {
-        combined.push(wc)
-      }
-    })
-    return combined
+
+    // Junta tudo e deduplica por multiplicador+janela de tempo
+    const combined = [...safeDb, ...safeWs];
+    return deduplicateCandles(combined);
   }, [dbCandles, ws?.candles])
 
-  // 2. Ordenação rigorosa por data (Mais recentes primeiro para o Feed)
+  // Feed: mais recentes primeiro
   const recentCandles = useMemo(() => {
     return [...allCandles]
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 20)
   }, [allCandles])
 
-  // 3. Ordenação para o gráfico (Mais antigas para as mais novas)
+  // Gráfico: mais antigas primeiro
   const barData = useMemo(() => {
     return [...allCandles]
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
@@ -55,9 +73,9 @@ export default function RealtimePage() {
 
   useEffect(() => {
     if (ws?.lastCandle?.cor === 'pink') {
-      toast.success('🌸 Rosa detectada!', { 
+      toast.success('🌸 Rosa detectada!', {
         description: `${Number(ws.lastCandle.multiplicador).toFixed(2)}x`,
-        duration: 5000 
+        duration: 5000
       })
     }
   }, [ws?.lastCandle])
@@ -87,13 +105,13 @@ export default function RealtimePage() {
               {ws?.connected ? 'Servidor Online' : 'Servidor Offline'}
             </h2>
             <p className="text-sm text-muted-foreground">
-              {ws?.connected 
-                ? `${ws?.status?.totalCaptured || 0} velas interceptadas nesta sessão` 
+              {ws?.connected
+                ? `${ws?.status?.totalCaptured || 0} velas interceptadas nesta sessão`
                 : 'O bot de captura não está respondendo'}
             </p>
           </div>
           {!ws?.connected && (
-             <Button variant="outline" size="sm" onClick={() => window.location.reload()}>Recarregar</Button>
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>Recarregar</Button>
           )}
         </div>
       </div>
@@ -106,15 +124,15 @@ export default function RealtimePage() {
             <AnimatePresence initial={false}>
               {recentCandles.map((c, i) => {
                 const date = new Date(c.created_at)
-                const timeAgo = isValid(date) 
+                const timeAgo = isValid(date)
                   ? formatDistanceToNow(date, { addSuffix: true, locale: ptBR })
                   : 'Agora'
 
                 return (
-                  <motion.div 
+                  <motion.div
                     key={c.id || c.rodada_id || i}
-                    initial={{ opacity: 0, y: -10 }} 
-                    animate={{ opacity: 1, y: 0 }} 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
                     className={`flex items-center gap-4 p-4 rounded-xl transition-all ${i === 0 ? 'bg-white/10 ring-1 ring-white/20' : 'bg-white/5'}`}
                   >
                     <div className="flex flex-col">
@@ -147,8 +165,8 @@ export default function RealtimePage() {
             {barData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={barData} margin={{ top: 0, right: 0, left: -40, bottom: 0 }}>
-                  <Tooltip 
-                    cursor={{fill: 'transparent'}}
+                  <Tooltip
+                    cursor={{ fill: 'transparent' }}
                     content={({ active, payload }) => {
                       if (active && payload && payload.length) {
                         return (

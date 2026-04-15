@@ -5,11 +5,9 @@ import { saveCandle } from '../services/supabaseService.js'
 
 let GLOBAL_LAST_ROUND_ID = '';
 
-// ─── DEBUG: Loga os primeiros N pacotes brutos para análise ──────────────────
-const DEBUG_RAW = true;   // ← mude para false depois de identificar o formato
-let DEBUG_COUNT = 0;
-const DEBUG_MAX = 20;
-// ─────────────────────────────────────────────────────────────────────────────
+// Deduplicação compartilhada entre WS e DOM — chave: valor, valor: timestamp
+const lastEmitted: Map<number, number> = new Map();
+const DEDUP_WINDOW_MS = 1500; // janela maior para cobrir latência DOM vs WS
 
 export function getRawFrames() { return []; }
 export function getDetectedWSUrls() { return []; }
@@ -17,7 +15,6 @@ export function getDetectedWSUrls() { return []; }
 export async function startInterception(page: Page): Promise<void> {
   logger.info('🔍 Iniciando interceptação Híbrida FINAL...')
 
-  // ─── WebSocket nativo: captura TUDO que chega do servidor ────────────────
   page.on('websocket', ws => {
     const url = ws.url();
     if (!url.includes('aviator') && !url.includes('p-j-0-h')) return;
@@ -29,25 +26,12 @@ export async function startInterception(page: Page): Promise<void> {
         ? f.payload
         : Buffer.from(f.payload as string, 'binary');
 
-      // DEBUG: Mostra os primeiros pacotes crus para análise
-      if (DEBUG_RAW && DEBUG_COUNT < DEBUG_MAX) {
-        DEBUG_COUNT++;
-        const isText = payload[0] === 0x7b || payload[0] === 0x5b; // { ou [
-        if (isText) {
-          logger.info(`📨 [DEBUG #${DEBUG_COUNT}] TEXT: ${payload.toString('utf8').slice(0, 300)}`);
-        } else {
-          logger.info(`📨 [DEBUG #${DEBUG_COUNT}] BIN (${payload.length}b): ${payload.toString('hex').slice(0, 120)}`);
-          logger.info(`📨 [DEBUG #${DEBUG_COUNT}] BIN-UTF8: ${payload.toString('utf8').replace(/[^\x20-\x7e]/g, '·').slice(0, 200)}`);
-        }
-      }
-
       tryParseCandle(payload);
     });
 
     ws.on('close', () => logger.info('🔌 WebSocket fechado'));
   });
 
-  // ─── Reload do iframe para forçar nova conexão WS ────────────────────────
   const frame = await forceReloadGameIframe(page);
 
   if (frame) {
@@ -123,14 +107,28 @@ async function forceReloadGameIframe(page: Page): Promise<Frame | null> {
   }
 }
 
-// ─── DOM POLLING (fallback garantido via scrape das bolinhas) ─────────────────
+// ─── HELPERS DE DEDUPLICAÇÃO ──────────────────────────────────────────────────
+
+function isDuplicate(mult: number): boolean {
+  const lastTime = lastEmitted.get(mult);
+  return lastTime !== undefined && Date.now() - lastTime < DEDUP_WINDOW_MS;
+}
+
+function markEmitted(mult: number): void {
+  const now = Date.now();
+  lastEmitted.set(mult, now);
+  for (const [key, ts] of lastEmitted) {
+    if (now - ts > DEDUP_WINDOW_MS * 10) lastEmitted.delete(key);
+  }
+}
+
+// ─── DOM POLLING ──────────────────────────────────────────────────────────────
 
 function startDOMPolling(frame: Frame): void {
   if ((frame as any)._isDOMPolling) return;
   (frame as any)._isDOMPolling = true;
   logger.info('✅ Captura ativa! Aguardando velas...');
 
-  // Guarda o snapshot inicial da barra para detectar apenas NOVAS bolinhas
   let lastTopValue: number | null = null;
 
   const interval = setInterval(async () => {
@@ -152,10 +150,17 @@ function startDOMPolling(frame: Frame): void {
 
       if (topValue !== null && topValue !== lastTopValue) {
         lastTopValue = topValue;
-        const rId = `dom_${topValue}_${Date.now()}`;
-        logger.info(`🕯️  Nova vela (DOM): ${topValue.toFixed(2)}x`);
-        const candle = candleService.addCandle(topValue, rId);
-        saveCandle(candle);
+
+        // Usa o mesmo mapa do WS — se já foi emitido dentro da janela, ignora
+        if (!isDuplicate(topValue)) {
+          markEmitted(topValue);
+          const rId = `dom_${topValue}_${Date.now()}`;
+          logger.info(`🕯️  Nova vela (DOM): ${topValue.toFixed(2)}x`);
+          const candle = candleService.addCandle(topValue, rId);
+          saveCandle(candle);
+        } else {
+          logger.info(`⏭️  DOM ignorado (já emitido pelo WS): ${topValue.toFixed(2)}x`);
+        }
       }
 
     } catch (_) {
@@ -179,7 +184,7 @@ function tryParseCandle(buf: Buffer): void {
     }
 
     // 2. JSON embutido após header binário
-    const jsonStart = buf.indexOf(0x7b); // byte '{'
+    const jsonStart = buf.indexOf(0x7b);
     if (jsonStart > 0 && jsonStart < buf.length - 2) {
       try {
         const data = JSON.parse(buf.slice(jsonStart).toString('utf8'));
@@ -188,7 +193,7 @@ function tryParseCandle(buf: Buffer): void {
       } catch (_) {}
     }
 
-    // 3. Regex sobre string UTF8 (captura mesmo em MessagePack parcialmente legível)
+    // 3. Regex sobre string UTF8
     const str = buf.toString('utf8');
     const crashMatch = str.match(/crash[^0-9]*([0-9]+\.?[0-9]*)/i);
     if (crashMatch) {
@@ -200,7 +205,7 @@ function tryParseCandle(buf: Buffer): void {
       }
     }
 
-    // 4. Busca binária com offsets variáveis após marcadores conhecidos
+    // 4. Busca binária com offsets variáveis
     for (const marker of ['crash', 'maxMultiplier']) {
       const idx = buf.indexOf(marker, 0, 'utf8');
       if (idx === -1) continue;
@@ -251,7 +256,11 @@ function handleParsedJSON(data: any): void {
 
 function emitCandle(mult: number, rId: string): void {
   if (rId === GLOBAL_LAST_ROUND_ID) return;
+  if (isDuplicate(mult)) return;
+
   GLOBAL_LAST_ROUND_ID = rId;
+  markEmitted(mult);
+
   logger.info(`🕯️  Nova vela (WS): ${mult.toFixed(2)}x (Round: ${rId})`);
   const candle = candleService.addCandle(mult, rId);
   saveCandle(candle);
