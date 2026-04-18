@@ -6,9 +6,32 @@ import { EventEmitter } from 'events'
 
 const MAX_CANDLES = 1000
 
+// Janela de dedup aumentada para 3s — cobre latência DOM vs WS com folga
+const DEDUP_WINDOW_MS = 3000
+
 class CandleService extends EventEmitter {
   private candles: Candle[] = []
   private totalCaptured: number = 0
+
+  // Mapa de dedup: chave = multiplicador com 2 casas, valor = timestamp da última emissão
+  private lastEmitted: Map<string, number> = new Map()
+
+  isDuplicate(multiplicador: number): boolean {
+    const key = multiplicador.toFixed(2)
+    const lastTime = this.lastEmitted.get(key)
+    return lastTime !== undefined && Date.now() - lastTime < DEDUP_WINDOW_MS
+  }
+
+  markEmitted(multiplicador: number): void {
+    const key = multiplicador.toFixed(2)
+    const now = Date.now()
+    this.lastEmitted.set(key, now)
+
+    // Limpa entradas antigas para não vazar memória
+    for (const [k, ts] of this.lastEmitted) {
+      if (now - ts > DEDUP_WINDOW_MS * 10) this.lastEmitted.delete(k)
+    }
+  }
 
   addCandle(multiplicador: number, rodada_id: string): Candle {
     const now = new Date().toISOString()
@@ -19,7 +42,7 @@ class CandleService extends EventEmitter {
       cor: calcularCor(multiplicador),
       rodada_id,
       timestamp: now,
-      created_at: now, // ← frontend usa created_at para ordenar e exibir
+      created_at: now, // frontend usa created_at para ordenar
       fonte: 'auto'
     }
 

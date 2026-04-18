@@ -62,12 +62,12 @@ async function initialize() {
       serverStarted = true
     }
 
-    // Autentica no Supabase com as credenciais do .env e resolve o user_id
-    // Feito UMA vez aqui — restartCapture não precisa repetir
+    // Resolve user_id pelo email uma única vez
     await initBotUser()
 
     await startCapture()
 
+    // Watchdog: reinicia se ficar mais de 5min sem velas
     cron.schedule('*/2 * * * *', async () => {
       const lastCandle = candleService.getLastCandle()
       if (lastCandle) {
@@ -96,9 +96,12 @@ async function startCapture() {
     const page = await launchBrowser()
     status.connected = true
 
-    login(page)
+    // ⚠️ Login DEVE terminar completamente antes de qualquer outra ação
+    const loggedIn = await login(page)
+    if (!loggedIn) throw new Error('Login falhou')
     status.loggedIn = true
 
+    // Só navega para o jogo após login confirmado
     await navigateToAviator(page)
     status.gameOpen = true
 

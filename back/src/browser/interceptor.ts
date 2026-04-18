@@ -5,10 +5,6 @@ import { saveCandle } from '../services/supabaseService.js'
 
 let GLOBAL_LAST_ROUND_ID = '';
 
-// Deduplicação compartilhada entre WS e DOM — chave: valor, valor: timestamp
-const lastEmitted: Map<number, number> = new Map();
-const DEDUP_WINDOW_MS = 1500; // janela maior para cobrir latência DOM vs WS
-
 export function getRawFrames() { return []; }
 export function getDetectedWSUrls() { return []; }
 
@@ -71,6 +67,8 @@ async function scrapeHistory(frame: Frame) {
       const cleanHistory = historyData.slice(0, 35);
       logger.info(`📦 Sucesso! ${cleanHistory.length} velas sincronizadas do histórico.`);
       for (const item of cleanHistory.reverse()) {
+        // Marca como emitido para evitar que o DOM polling re-emita essas
+        candleService.markEmitted(item!.val)
         const candle = candleService.addCandle(item!.val, item!.id);
         await saveCandle(candle);
       }
@@ -107,21 +105,6 @@ async function forceReloadGameIframe(page: Page): Promise<Frame | null> {
   }
 }
 
-// ─── HELPERS DE DEDUPLICAÇÃO ──────────────────────────────────────────────────
-
-function isDuplicate(mult: number): boolean {
-  const lastTime = lastEmitted.get(mult);
-  return lastTime !== undefined && Date.now() - lastTime < DEDUP_WINDOW_MS;
-}
-
-function markEmitted(mult: number): void {
-  const now = Date.now();
-  lastEmitted.set(mult, now);
-  for (const [key, ts] of lastEmitted) {
-    if (now - ts > DEDUP_WINDOW_MS * 10) lastEmitted.delete(key);
-  }
-}
-
 // ─── DOM POLLING ──────────────────────────────────────────────────────────────
 
 function startDOMPolling(frame: Frame): void {
@@ -151,9 +134,9 @@ function startDOMPolling(frame: Frame): void {
       if (topValue !== null && topValue !== lastTopValue) {
         lastTopValue = topValue;
 
-        // Usa o mesmo mapa do WS — se já foi emitido dentro da janela, ignora
-        if (!isDuplicate(topValue)) {
-          markEmitted(topValue);
+        // Usa dedup centralizado do candleService
+        if (!candleService.isDuplicate(topValue)) {
+          candleService.markEmitted(topValue);
           const rId = `dom_${topValue}_${Date.now()}`;
           logger.info(`🕯️  Nova vela (DOM): ${topValue.toFixed(2)}x`);
           const candle = candleService.addCandle(topValue, rId);
@@ -174,7 +157,6 @@ function startDOMPolling(frame: Frame): void {
 
 function tryParseCandle(buf: Buffer): void {
   try {
-    // 1. JSON puro
     if (buf[0] === 0x7b || buf[0] === 0x5b) {
       try {
         const data = JSON.parse(buf.toString('utf8'));
@@ -183,7 +165,6 @@ function tryParseCandle(buf: Buffer): void {
       } catch (_) {}
     }
 
-    // 2. JSON embutido após header binário
     const jsonStart = buf.indexOf(0x7b);
     if (jsonStart > 0 && jsonStart < buf.length - 2) {
       try {
@@ -193,7 +174,6 @@ function tryParseCandle(buf: Buffer): void {
       } catch (_) {}
     }
 
-    // 3. Regex sobre string UTF8
     const str = buf.toString('utf8');
     const crashMatch = str.match(/crash[^0-9]*([0-9]+\.?[0-9]*)/i);
     if (crashMatch) {
@@ -205,7 +185,6 @@ function tryParseCandle(buf: Buffer): void {
       }
     }
 
-    // 4. Busca binária com offsets variáveis
     for (const marker of ['crash', 'maxMultiplier']) {
       const idx = buf.indexOf(marker, 0, 'utf8');
       if (idx === -1) continue;
@@ -256,10 +235,10 @@ function handleParsedJSON(data: any): void {
 
 function emitCandle(mult: number, rId: string): void {
   if (rId === GLOBAL_LAST_ROUND_ID) return;
-  if (isDuplicate(mult)) return;
+  if (candleService.isDuplicate(mult)) return;
 
   GLOBAL_LAST_ROUND_ID = rId;
-  markEmitted(mult);
+  candleService.markEmitted(mult);
 
   logger.info(`🕯️  Nova vela (WS): ${mult.toFixed(2)}x (Round: ${rId})`);
   const candle = candleService.addCandle(mult, rId);
