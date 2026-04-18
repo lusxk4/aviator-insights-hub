@@ -5,7 +5,7 @@ import { corParaLabel } from '@/utils/candleUtils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip } from 'recharts'
+import { BarChart, Bar, ResponsiveContainer, Cell, Tooltip } from 'recharts'
 import { motion, AnimatePresence } from 'framer-motion'
 import { formatDistanceToNow, isValid } from 'date-fns'
 import { ptBR } from 'date-fns/locale'
@@ -13,69 +13,42 @@ import { toast } from 'sonner'
 
 const COLORS = { blue: 'hsl(217,91%,60%)', purple: 'hsl(263,70%,58%)', pink: 'hsl(330,80%,60%)' }
 
-// Deduplicação no front: agrupa por multiplicador+janela de 2s
-// Evita que velas do WS e do banco apareçam duplicadas na tela
-function deduplicateCandles(candles: any[]): any[] {
-  const seen = new Map<string, boolean>();
-  const result: any[] = [];
-
-  // Ordena do mais antigo ao mais novo para o dedup funcionar corretamente
-  const sorted = [...candles].sort(
-    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-  );
-
-  for (const candle of sorted) {
-    const mult = Number(candle.multiplicador).toFixed(2);
-    const bucket = Math.floor(new Date(candle.created_at).getTime() / 2000); // janela de 2s
-    const key = `${mult}_${bucket}`;
-    if (!seen.has(key)) {
-      seen.set(key, true);
-      result.push(candle);
-    }
-  }
-
-  return result;
-}
-
 export default function RealtimePage() {
   const ws = useWS()
-  const { addCandle, candles: dbCandles } = useCandles({ limit: 30 })
+  // addCandle ainda é necessário para a entrada manual — mas NÃO buscamos velas do banco aqui
+  const { addCandle } = useCandles()
   const [manualValue, setManualValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const allCandles = useMemo(() => {
-    const safeDb = Array.isArray(dbCandles) ? dbCandles : []
-    const safeWs = Array.isArray(ws?.candles) ? ws.candles : []
-
-    // Junta tudo e deduplica por multiplicador+janela de tempo
-    const combined = [...safeDb, ...safeWs];
-    return deduplicateCandles(combined);
-  }, [dbCandles, ws?.candles])
+  // Fonte única de verdade: apenas o que chegou via WebSocket nesta sessão
+  const wsCandles: any[] = useMemo(() => {
+    return Array.isArray(ws?.candles) ? ws.candles : []
+  }, [ws?.candles])
 
   // Feed: mais recentes primeiro
   const recentCandles = useMemo(() => {
-    return [...allCandles]
+    return [...wsCandles]
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 20)
-  }, [allCandles])
+  }, [wsCandles])
 
-  // Gráfico: mais antigas primeiro
+  // Gráfico: mais antigas primeiro, últimas 30
   const barData = useMemo(() => {
-    return [...allCandles]
+    return [...wsCandles]
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
       .slice(-30)
       .map((c, i) => ({
         index: i,
         mult: Number(c.multiplicador),
-        cor: c.cor || 'blue'
+        cor: c.cor || 'blue',
       }))
-  }, [allCandles])
+  }, [wsCandles])
 
   useEffect(() => {
     if (ws?.lastCandle?.cor === 'pink') {
       toast.success('🌸 Rosa detectada!', {
         description: `${Number(ws.lastCandle.multiplicador).toFixed(2)}x`,
-        duration: 5000
+        duration: 5000,
       })
     }
   }, [ws?.lastCandle])
@@ -88,7 +61,7 @@ export default function RealtimePage() {
       await addCandle(val, 'manual')
       setManualValue('')
       toast.success('Vela adicionada manualmente')
-    } catch (err) {
+    } catch {
       toast.error('Erro ao salvar vela')
     }
     inputRef.current?.focus()
@@ -111,15 +84,19 @@ export default function RealtimePage() {
             </p>
           </div>
           {!ws?.connected && (
-            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>Recarregar</Button>
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
+              Recarregar
+            </Button>
           )}
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Feed em Tempo Real */}
+        {/* Feed em Tempo Real — somente velas do WebSocket desta sessão */}
         <div className="glass-card p-4 space-y-3 border border-white/10 bg-white/5 rounded-xl">
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Monitoramento ao vivo</h3>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Monitoramento ao vivo
+          </h3>
           <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
             <AnimatePresence initial={false}>
               {recentCandles.map((c, i) => {
@@ -135,12 +112,20 @@ export default function RealtimePage() {
                     animate={{ opacity: 1, y: 0 }}
                     className={`flex items-center gap-4 p-4 rounded-xl transition-all ${i === 0 ? 'bg-white/10 ring-1 ring-white/20' : 'bg-white/5'}`}
                   >
-                    <div className="flex flex-col">
-                      <span className="text-2xl font-black font-mono tracking-tighter" style={{ color: COLORS[c.cor as keyof typeof COLORS] }}>
-                        {Number(c.multiplicador).toFixed(2)}x
-                      </span>
-                    </div>
-                    <Badge variant="outline" className="font-bold" style={{ borderColor: COLORS[c.cor as keyof typeof COLORS], color: COLORS[c.cor as keyof typeof COLORS] }}>
+                    <span
+                      className="text-2xl font-black font-mono tracking-tighter"
+                      style={{ color: COLORS[c.cor as keyof typeof COLORS] }}
+                    >
+                      {Number(c.multiplicador).toFixed(2)}x
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className="font-bold"
+                      style={{
+                        borderColor: COLORS[c.cor as keyof typeof COLORS],
+                        color: COLORS[c.cor as keyof typeof COLORS],
+                      }}
+                    >
                       {corParaLabel(c.cor)}
                     </Badge>
                     <span className="text-[10px] uppercase font-medium text-muted-foreground ml-auto">
@@ -150,33 +135,37 @@ export default function RealtimePage() {
                 )
               })}
             </AnimatePresence>
+
             {recentCandles.length === 0 && (
               <div className="flex flex-col items-center justify-center py-12 text-center">
-                <p className="text-muted-foreground animate-pulse">Aguardando sinais do bot...</p>
+                <p className="text-muted-foreground animate-pulse">
+                  {ws?.connected
+                    ? 'Aguardando sinais do bot...'
+                    : 'Servidor offline — nenhuma vela nesta sessão.'}
+                </p>
               </div>
             )}
           </div>
         </div>
 
         <div className="space-y-6">
-          {/* Gráfico de Barras Coloridas */}
+          {/* Gráfico de Barras */}
           <div className="glass-card p-4 h-[280px] border border-white/10 bg-white/5 rounded-xl">
-            <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Volatilidade Recente</h3>
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">
+              Volatilidade Recente
+            </h3>
             {barData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={barData} margin={{ top: 0, right: 0, left: -40, bottom: 0 }}>
                   <Tooltip
                     cursor={{ fill: 'transparent' }}
-                    content={({ active, payload }) => {
-                      if (active && payload && payload.length) {
-                        return (
-                          <div className="bg-black/80 border border-white/10 p-2 rounded text-xs font-mono">
-                            {payload[0].value}x
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
+                    content={({ active, payload }) =>
+                      active && payload?.length ? (
+                        <div className="bg-black/80 border border-white/10 p-2 rounded text-xs font-mono">
+                          {payload[0].value}x
+                        </div>
+                      ) : null
+                    }
                   />
                   <Bar dataKey="mult" radius={[4, 4, 0, 0]}>
                     {barData.map((entry, index) => (
@@ -187,25 +176,34 @@ export default function RealtimePage() {
               </ResponsiveContainer>
             ) : (
               <div className="flex items-center justify-center h-full text-muted-foreground text-sm italic">
-                Aguardando dados para gerar gráfico...
+                {ws?.connected
+                  ? 'Aguardando dados para gerar gráfico...'
+                  : 'Servidor offline — gráfico indisponível.'}
               </div>
             )}
           </div>
 
-          {/* Input de Segurança (Manual) */}
+          {/* Entrada Manual de Contingência */}
           <div className="glass-card p-6 border border-white/10 bg-white/5 rounded-xl space-y-4">
             <div>
-              <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Entrada de Contingência</h3>
-              <p className="text-xs text-muted-foreground mt-1">Use apenas se a interceptação automática falhar.</p>
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                Entrada de Contingência
+              </h3>
+              <p className="text-xs text-muted-foreground mt-1">
+                Use apenas se a interceptação automática falhar.
+              </p>
             </div>
             <form onSubmit={handleManualEntry} className="flex gap-3">
               <Input
                 ref={inputRef}
                 type="number" step="0.01" min="1" placeholder="Ex: 2.50"
-                value={manualValue} onChange={e => setManualValue(e.target.value)}
+                value={manualValue}
+                onChange={e => setManualValue(e.target.value)}
                 className="bg-white/5 border-white/10 font-mono text-lg h-12"
               />
-              <Button type="submit" className="h-12 px-6 bg-blue-600 hover:bg-blue-700">Inserir</Button>
+              <Button type="submit" className="h-12 px-6 bg-blue-600 hover:bg-blue-700">
+                Inserir
+              </Button>
             </form>
           </div>
         </div>

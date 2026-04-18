@@ -2,7 +2,6 @@ import { createClient } from '@supabase/supabase-js'
 import { logger } from '../utils/logger.js'
 import { Candle } from '../types/index.js'
 
-// Service key tem acesso admin — consegue buscar qualquer usuário pelo email
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_KEY!,
@@ -10,8 +9,9 @@ const supabase = createClient(
 )
 
 let resolvedUserId: string | null = null
+let currentSessionId: string | null = null
 
-// Chame isso UMA vez no startup — busca o user_id pelo email via admin API
+// Chame isso UMA vez no startup
 export async function initBotUser(): Promise<void> {
   const email = process.env.BET923_EMAIL
 
@@ -38,8 +38,43 @@ export async function initBotUser(): Promise<void> {
 
     resolvedUserId = user.id
     logger.info(`✅ Bot vinculado ao usuário: ${email} (user_id: ${resolvedUserId})`)
+
+    // Cria a sessão logo após resolver o usuário
+    await initSession()
   } catch (err: any) {
     logger.error(`💥 Erro crítico ao buscar usuário: ${err.message}`)
+  }
+}
+
+// Cria uma nova sessão no banco e armazena o ID localmente
+async function initSession(): Promise<void> {
+  if (!resolvedUserId) return
+
+  try {
+    const { data, error } = await supabase
+      .from('sessions')
+      .insert({
+        user_id: resolvedUserId,
+        started_at: new Date().toISOString(),
+        label: `Sessão ${new Date().toLocaleString('pt-BR', {
+          day: '2-digit',
+          month: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        })}`,
+      })
+      .select('id')
+      .single()
+
+    if (error) {
+      logger.error(`❌ Erro ao criar sessão: ${error.message}`)
+      return
+    }
+
+    currentSessionId = data.id
+    logger.info(`🆕 Sessão iniciada: ${currentSessionId}`)
+  } catch (err: any) {
+    logger.error(`💥 Falha ao criar sessão: ${err.message}`)
   }
 }
 
@@ -49,9 +84,15 @@ export async function saveCandle(candle: Candle): Promise<void> {
     return
   }
 
+  if (!currentSessionId) {
+    logger.warn('⚠️  session_id não resolvido — vela não salva')
+    return
+  }
+
   try {
     const { error } = await supabase.from('candles').insert({
       user_id: resolvedUserId,
+      session_id: currentSessionId,   // ← campo novo
       multiplicador: candle.multiplicador,
       cor: candle.cor,
       rodada_id: candle.rodada_id,
@@ -64,9 +105,13 @@ export async function saveCandle(candle: Candle): Promise<void> {
         logger.error(`❌ Erro Supabase: ${error.message}`)
       }
     } else {
-      logger.info(`✅ Vela salva: ${candle.multiplicador}x`)
+      logger.info(`✅ Vela salva: ${candle.multiplicador}x (sessão ${currentSessionId})`)
     }
   } catch (err: any) {
     logger.error(`💥 Falha crítica ao salvar vela: ${err.message}`)
   }
+}
+
+export function getCurrentSessionId(): string | null {
+  return currentSessionId
 }
