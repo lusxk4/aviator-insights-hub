@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useCandles, useSessions } from '@/hooks/useCandles'
-import { detectarPadroes, corParaLabel } from '@/utils/candleUtils'
+import { useWS } from '@/contexts/WebSocketContext'
+import { detectarPadroes, corParaLabel, calcularStats } from '@/utils/candleUtils'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
   Brush, ReferenceLine, PieChart, Pie, Cell,
@@ -23,53 +24,68 @@ const LIMITS = [50, 100, 200, 500, 1000]
 export default function DashboardPage() {
   const [limit, setLimit] = useState(200)
   const [importOpen, setImportOpen] = useState(false)
+  const ws = useWS()
 
-  // Busca todas as sessões disponíveis
   const { sessions, loadingSessions } = useSessions()
-
-  // null = sem filtro de sessão (todas), string = sessão específica
-  // Começa com a sessão mais recente assim que as sessões carregam
   const [selectedSessionId, setSelectedSessionId] = useState<string | null | 'LOADING'>('LOADING')
 
-  // Quando as sessões chegam pela primeira vez, seleciona a mais recente automaticamente
   const resolvedSessionId = useMemo(() => {
     if (selectedSessionId !== 'LOADING') return selectedSessionId
-    if (loadingSessions || sessions.length === 0) return undefined // undefined = ainda aguardando
+    if (loadingSessions || sessions.length === 0) return undefined
     return sessions[0]?.id ?? null
   }, [selectedSessionId, sessions, loadingSessions])
 
-  const { candles, stats, loading } = useCandles({
+  // Velas confirmadas no banco (Supabase Realtime)
+  const { candles: dbCandles, loading } = useCandles({
     limit,
-    // Passa undefined enquanto ainda não resolveu — evita fetch sem filtro antes da sessão carregar
     sessionId: resolvedSessionId === undefined ? undefined : resolvedSessionId,
   })
 
-  const sortedCandles = useMemo(() =>
-    [...candles].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()),
+  // Mescla banco + WebSocket e deduplica.
+  // Chave de dedup: multiplicador + bucket de 3s (cobre pequenas diferenças de timestamp
+  // entre o momento em que o WS emite e o created_at gravado no banco).
+  const candles = useMemo(() => {
+    const wsCandles: any[] = Array.isArray(ws?.candles) ? ws.candles : []
+
+    const key = (c: any) => {
+      const bucket = Math.floor(new Date(c.created_at).getTime() / 3000)
+      return `${Number(c.multiplicador).toFixed(2)}_${bucket}`
+    }
+
+    // Banco tem prioridade — suas entradas ficam no Map primeiro
+    const map = new Map<string, any>()
+    for (const c of dbCandles)  map.set(key(c), c)
+    for (const c of wsCandles)  { if (!map.has(key(c))) map.set(key(c), c) }
+
+    return Array.from(map.values())
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      .slice(-limit)
+  }, [dbCandles, ws?.candles, limit])
+
+  // Stats recalculadas sobre as velas mescladas — reage instantaneamente ao WS
+  const stats = useMemo(() => calcularStats(candles), [candles])
+
+  const padroes = useMemo(() => detectarPadroes(candles), [candles])
+
+  const chartData = useMemo(() =>
+    candles.map((c: any, i: number) => ({ index: i + 1, mult: Number(c.multiplicador), cor: c.cor })),
     [candles]
   )
 
-  const padroes = useMemo(() => detectarPadroes(sortedCandles), [sortedCandles])
-
-  const chartData = useMemo(() =>
-    sortedCandles.map((c, i) => ({ index: i + 1, mult: Number(c.multiplicador), cor: c.cor })),
-    [sortedCandles]
-  )
-
   const pieData = useMemo(() => [
-    { name: 'Azul', value: stats?.blue?.count || 0, color: COLORS.blue },
-    { name: 'Roxa', value: stats?.purple?.count || 0, color: COLORS.purple },
-    { name: 'Rosa', value: stats?.pink?.count || 0, color: COLORS.pink },
+    { name: 'Azul',  value: stats?.blue?.count   || 0, color: COLORS.blue },
+    { name: 'Roxa',  value: stats?.purple?.count || 0, color: COLORS.purple },
+    { name: 'Rosa',  value: stats?.pink?.count   || 0, color: COLORS.pink },
   ], [stats])
 
   const maiorCandle = useMemo(() => {
     if (candles.length === 0) return null
-    return candles.reduce((max, c) => c.multiplicador > max.multiplicador ? c : max, candles[0])
+    return candles.reduce((max: any, c: any) => c.multiplicador > max.multiplicador ? c : max, candles[0])
   }, [candles])
 
   const exportCSV = () => {
     const csv = ['multiplicador,cor,fonte,sessao,data',
-      ...candles.map(c => `${c.multiplicador},${c.cor},${c.fonte},${c.session_id ?? ''},${c.created_at}`)
+      ...candles.map((c: any) => `${c.multiplicador},${c.cor},${c.fonte ?? ''},${c.session_id ?? ''},${c.created_at}`)
     ].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
@@ -79,11 +95,6 @@ export default function DashboardPage() {
     a.click()
   }
 
-  const handleSelectSession = (id: string | null) => {
-    setSelectedSessionId(id)
-  }
-
-  // Label da sessão selecionada para exibição
   const sessionLabel = useMemo(() => {
     const id = resolvedSessionId === undefined ? null : resolvedSessionId
     if (id === null) return 'Todas as sessões'
@@ -91,7 +102,8 @@ export default function DashboardPage() {
     return s ? s.label : 'Sessão atual'
   }, [resolvedSessionId, sessions])
 
-  const isCurrentSession = resolvedSessionId !== undefined &&
+  const isCurrentSession =
+    resolvedSessionId !== undefined &&
     resolvedSessionId !== null &&
     sessions[0]?.id === resolvedSessionId
 
@@ -111,7 +123,6 @@ export default function DashboardPage() {
 
       {/* ── Barra de controles ── */}
       <div className="flex flex-wrap items-center gap-3">
-        {/* Limite */}
         <div className="flex gap-1 bg-white/5 rounded-lg p-1 border border-white/10">
           {LIMITS.map(l => (
             <button key={l} onClick={() => setLimit(l)}
@@ -123,10 +134,9 @@ export default function DashboardPage() {
 
         {/* Seletor de sessão */}
         <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1 border border-white/10 overflow-x-auto max-w-[420px]">
-          {/* Botão "Atual" — primeira sessão */}
           {sessions[0] && (
             <button
-              onClick={() => handleSelectSession(sessions[0].id)}
+              onClick={() => setSelectedSessionId(sessions[0].id)}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md font-medium transition-all whitespace-nowrap
                 ${resolvedSessionId === sessions[0].id
                   ? 'bg-emerald-600 text-white shadow-lg'
@@ -143,11 +153,10 @@ export default function DashboardPage() {
             </button>
           )}
 
-          {/* Sessões anteriores */}
           {sessions.slice(1).map((s) => (
             <button
               key={s.id}
-              onClick={() => handleSelectSession(s.id)}
+              onClick={() => setSelectedSessionId(s.id)}
               title={s.label}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md font-medium transition-all whitespace-nowrap
                 ${resolvedSessionId === s.id
@@ -161,9 +170,8 @@ export default function DashboardPage() {
             </button>
           ))}
 
-          {/* Todas as sessões */}
           <button
-            onClick={() => handleSelectSession(null)}
+            onClick={() => setSelectedSessionId(null)}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md font-medium transition-all whitespace-nowrap
               ${resolvedSessionId === null
                 ? 'bg-purple-600 text-white shadow-lg'
@@ -198,13 +206,13 @@ export default function DashboardPage() {
           </span>
         )}
         <span>{sessionLabel}</span>
-        {resolvedSessionId && sessions.find(s => s.id === resolvedSessionId) && (
-          <span className="text-white/30">·</span>
-        )}
         {resolvedSessionId && (() => {
           const s = sessions.find(s => s.id === resolvedSessionId)
           return s && isValid(new Date(s.started_at))
-            ? <span>iniciada em {format(new Date(s.started_at), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}</span>
+            ? <>
+                <span className="text-white/30">·</span>
+                <span>iniciada em {format(new Date(s.started_at), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}</span>
+              </>
             : null
         })()}
       </div>
@@ -215,7 +223,9 @@ export default function DashboardPage() {
         <MetricCard
           label="Maior multiplicador"
           value={`${stats?.maior?.toFixed(2) || '1.00'}x`}
-          sub={maiorCandle ? format(new Date(maiorCandle.created_at), 'dd/MM HH:mm') : ''}
+          sub={maiorCandle && isValid(new Date((maiorCandle as any).created_at))
+            ? format(new Date((maiorCandle as any).created_at), 'dd/MM HH:mm')
+            : ''}
         />
         <MetricCard label="Média geral" value={`${stats?.media?.toFixed(2) || '1.00'}x`} />
         <MetricCard
@@ -292,8 +302,8 @@ export default function DashboardPage() {
             </tr>
           </thead>
           <tbody>
-            {[...candles].reverse().slice(0, 10).map((c) => (
-              <tr key={c.id} className="border-b border-white/5 hover:bg-white/10 transition-colors">
+            {[...candles].reverse().slice(0, 10).map((c: any, i: number) => (
+              <tr key={c.id || i} className="border-b border-white/5 hover:bg-white/10 transition-colors">
                 <td className="p-4 text-muted-foreground">
                   {isValid(new Date(c.created_at)) ? format(new Date(c.created_at), 'HH:mm:ss') : 'Agora'}
                 </td>
