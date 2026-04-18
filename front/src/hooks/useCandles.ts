@@ -91,12 +91,23 @@ export function useCandles(options: UseCandlesOptions = {}) {
 
   useEffect(() => { fetchCandles() }, [fetchCandles])
 
-  // Realtime: escuta INSERT — respeita a sessão ativa
+  // Realtime: escuta INSERT com channel gerenciado por ref para evitar subscribe duplo
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
+  const sessionIdRef = useRef(options.sessionId)
+  sessionIdRef.current = options.sessionId
+
   useEffect(() => {
     if (!user) return
+
+    // Remove channel anterior antes de criar um novo
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current)
+      channelRef.current = null
+    }
+
     const channelName = `candles-realtime-${user.id}-${Date.now()}`
 
-    const channel = supabase
+    channelRef.current = supabase
       .channel(channelName)
       .on(
         'postgres_changes',
@@ -104,8 +115,8 @@ export function useCandles(options: UseCandlesOptions = {}) {
         (payload) => {
           const newCandle = payload.new as Candle
 
-          // Se há um filtro de sessão ativo, ignora velas de outras sessões
-          if (options.sessionId && newCandle.session_id !== options.sessionId) return
+          // Le sessionId do ref para sempre ter valor atual sem recriar o channel
+          if (sessionIdRef.current && newCandle.session_id !== sessionIdRef.current) return
 
           setDbCandles(prev => {
             if (prev.some(c => c.id === newCandle.id)) return prev
@@ -119,8 +130,13 @@ export function useCandles(options: UseCandlesOptions = {}) {
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
-  }, [user, options.sessionId])
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+    }
+  }, [user]) // so recria o channel quando o usuario muda; sessionId e lido via ref
 
   const addCandle = useCallback(async (multiplicador: number, fonte: 'manual' | 'csv' | 'auto' = 'manual') => {
     if (!user) return
