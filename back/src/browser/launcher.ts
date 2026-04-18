@@ -100,7 +100,7 @@ const WS_INTERCEPTOR_SCRIPT = `(function() {
 export async function launchBrowser(): Promise<Page> {
   logger.info('🚀 Iniciando Firefox...')
 
-  const headless = process.env.HEADLESS === 'true'
+  const headless = process.env.HEADLESS === 'false'
   const storageState = fs.existsSync(SESSION_PATH) ? SESSION_PATH : undefined
 
   if (storageState) {
