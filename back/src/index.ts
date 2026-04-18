@@ -10,6 +10,7 @@ import { navigateToAviator } from './browser/navigator.js'
 import { startInterception } from './browser/interceptor.js'
 import { setupWebSocket } from './server/websocket.js'
 import { candleService } from './services/candleService.js'
+import { initBotUser } from './services/supabaseService.js'
 import { ServerStatus } from './types/index.js'
 import apiRouter from './server/api.js'
 import fs from 'fs'
@@ -18,7 +19,7 @@ if (!fs.existsSync('logs')) fs.mkdirSync('logs')
 
 const app = express()
 const server = createServer(app)
-let serverStarted = false  // ← controla se o HTTP já foi iniciado
+let serverStarted = false
 
 app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:3000'] }))
 app.use(express.json())
@@ -51,7 +52,6 @@ async function initialize() {
     logger.info('🛩️  AVIATOR CAPTURE SERVER iniciando...')
     logger.info('='.repeat(50))
 
-    // Só inicia o HTTP uma vez
     if (!serverStarted) {
       const port = process.env.PORT || 3001
       server.listen(port, () => {
@@ -61,6 +61,10 @@ async function initialize() {
       setupWebSocket(server)
       serverStarted = true
     }
+
+    // Autentica no Supabase com as credenciais do .env e resolve o user_id
+    // Feito UMA vez aqui — restartCapture não precisa repetir
+    await initBotUser()
 
     await startCapture()
 
@@ -79,7 +83,7 @@ async function initialize() {
   } catch (err) {
     logger.error(`Erro fatal na inicialização: ${err}`)
     logger.warn('🔄 Tentando reiniciar em 15 segundos...')
-    setTimeout(() => startCapture(), 15000)  // ← só reinicia a captura, não o servidor inteiro
+    setTimeout(() => startCapture(), 15000)
   }
 }
 

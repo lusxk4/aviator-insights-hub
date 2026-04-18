@@ -11,12 +11,15 @@ class CandleService extends EventEmitter {
   private totalCaptured: number = 0
 
   addCandle(multiplicador: number, rodada_id: string): Candle {
+    const now = new Date().toISOString()
+
     const candle: Candle = {
       id: uuidv4(),
       multiplicador,
       cor: calcularCor(multiplicador),
       rodada_id,
-      timestamp: new Date().toISOString(),
+      timestamp: now,
+      created_at: now, // ← frontend usa created_at para ordenar e exibir
       fonte: 'auto'
     }
 

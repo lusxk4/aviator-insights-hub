@@ -4,6 +4,7 @@ export interface Candle {
   cor: 'blue' | 'purple' | 'pink'
   rodada_id: string
   timestamp: string
+  created_at: string  // ← espelho do timestamp, usado pelo frontend para ordenação
   fonte: 'auto'
 }
 
